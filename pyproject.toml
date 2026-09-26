@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chambara-talk"
+version = "0.1.0"
+description = "Local voice conversation prototype for a chambara robot attraction"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "faster-whisper>=1.1.0,<2",
+    "numpy>=1.26,<3",
+    "ollama>=0.4.0,<1",
+    "pyttsx3==2.98",
+    "sounddevice>=0.5.0,<1",
+]
+
+[project.scripts]
+chambara-talk = "chambara_talk.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

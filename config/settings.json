@@ -1,0 +1,40 @@
+{
+  "audio": {
+    "sample_rate": 16000,
+    "channels": 1,
+    "silence_seconds": 2.0,
+    "speech_wait_timeout_seconds": 10.0,
+    "max_recording_seconds": 20.0,
+    "calibration_seconds": 0.5,
+    "block_seconds": 0.05,
+    "minimum_rms_threshold": 0.01,
+    "noise_multiplier": 3.0,
+    "pre_roll_seconds": 0.3,
+    "input_device": null
+  },
+  "speech_recognition": {
+    "model": "small",
+    "device": "cuda",
+    "compute_type": "int8_float16",
+    "language": "ja",
+    "beam_size": 5
+  },
+  "llm": {
+    "host": "http://localhost:11434",
+    "model": "qwen2.5:3b",
+    "production_model": "gpt-oss:20b",
+    "timeout_seconds": 120.0,
+    "temperature": 0.4,
+    "max_response_chars": 80
+  },
+  "tts": {
+    "voice_match": "Haruka",
+    "rate": 175,
+    "volume": 1.0
+  },
+  "questions": {
+    "strategy": "いざ勝負でござる！ どんな作戦で挑むのか、意気込みを聞かせてくだされ。",
+    "feedback": "お疲れさまでござる！ チャンバラをやってみた感想を聞かせてくだされ。"
+  }
+}
+
