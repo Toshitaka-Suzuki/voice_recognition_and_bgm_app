@@ -1,4 +1,7 @@
-"""Chambara attraction conversation application."""
+"""チャンバラロボット会話アプリを構成するPythonパッケージ。
+
+このファイルがあることで、``chambara_talk``ディレクトリをPythonの
+パッケージとして読み込めます。``__version__``はアプリの版番号です。
+"""
 
 __version__ = "0.1.0"
-

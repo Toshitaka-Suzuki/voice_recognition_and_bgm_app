@@ -1,3 +1,5 @@
+"""OllamaのローカルLLMへ会話例と認識文を渡し、コメントを生成する。"""
+
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -9,12 +11,18 @@ from .models import ConversationExample, ConversationPhase
 
 
 class ChatBackend:
+    """Ollamaクライアント、プロンプト作成、返答の長さ調整を担当する。"""
+
     def __init__(self, settings: LLMSettings, domain_terms: Sequence[str]) -> None:
+        """LLM設定と、聞き間違いの補正に使う用語一覧を保持する。"""
+
         self.settings = settings
         self.domain_terms = tuple(domain_terms)
         self._client: Any = None
 
     def _get_client(self):  # noqa: ANN202
+        """Ollamaクライアントを必要になった時点で1度だけ作成して返す。"""
+
         if self._client is None:
             try:
                 from ollama import Client
@@ -28,11 +36,14 @@ class ChatBackend:
         return self._client
 
     def check_model(self) -> None:
+        """Ollamaへ接続し、設定されたモデルが取得済みか確認する。"""
+
         try:
             response = self._get_client().list()
             raw_models = getattr(response, "models", None)
             if raw_models is None and isinstance(response, dict):
                 raw_models = response.get("models", [])
+            # Ollamaライブラリの版により辞書かオブジェクトが返るため両方に対応します。
             names = {self._model_name(model) for model in (raw_models or [])}
         except Exception as exc:
             raise LLMError(
@@ -47,6 +58,8 @@ class ChatBackend:
 
     @staticmethod
     def _model_name(model: Any) -> str:
+        """Ollamaのモデル情報から、モデル名を文字列として取り出す。"""
+
         if isinstance(model, dict):
             return str(model.get("model") or model.get("name") or "")
         return str(getattr(model, "model", None) or getattr(model, "name", ""))
@@ -57,6 +70,8 @@ class ChatBackend:
         transcript: str,
         examples: Sequence[ConversationExample],
     ) -> list[dict[str, str]]:
+        """システム指示、現在フェーズの全会話例、認識文を順番に並べる。"""
+
         phase_instruction = {
             ConversationPhase.STRATEGY: "作戦や意気込みの工夫を認め、勝負へ向けて応援してください。",
             ConversationPhase.FEEDBACK: "楽しさ、驚き、悔しさなどの感想を受け止めてください。",
@@ -75,6 +90,7 @@ class ChatBackend:
             f"フェーズ固有の指示: {phase_instruction}\n"
             f"用語一覧: {terms}"
         )
+        # 会話例はJSONの記載順にuser/assistantの組として全件追加します。
         messages = [{"role": "system", "content": system_prompt}]
         for example in examples:
             messages.append({"role": "user", "content": example.user})
@@ -88,13 +104,18 @@ class ChatBackend:
         transcript: str,
         examples: Sequence[ConversationExample],
     ) -> str:
+        """LLMのコメントを生成し、設定された最大文字数以内で返す。"""
+
         messages = self.build_messages(phase, transcript, examples)
         response = self._chat(messages)
+        # 長すぎるときは意味を保った短縮を一度だけLLMへ依頼します。
         if len(response) > self.settings.max_response_chars:
             response = self._request_shortening(response)
         return self._clip_to_limit(response)
 
     def _chat(self, messages: list[dict[str, str]]) -> str:
+        """Ollamaへメッセージを送り、空でない返答本文を返す。"""
+
         try:
             result = self._get_client().chat(
                 model=self.settings.model,
@@ -113,6 +134,8 @@ class ChatBackend:
         return content.strip()
 
     def _request_shortening(self, response: str) -> str:
+        """長い返答を、情報を加えず指定文字数まで短くするよう依頼する。"""
+
         messages = [
             {
                 "role": "system",
@@ -123,19 +146,22 @@ class ChatBackend:
             },
             {"role": "user", "content": response},
         ]
+        # 短縮処理だけが失敗した場合は、元の返答を後段の機械的短縮へ回します。
         try:
             return self._chat(messages)
         except LLMError:
             return response
 
     def _clip_to_limit(self, text: str) -> str:
+        """返答を最大文字数以内へ、できるだけ文末を保って切り詰める。"""
+
         limit = self.settings.max_response_chars
         text = text.strip()
         if len(text) <= limit:
             return text
         candidate = text[:limit]
+        # 前半より後ろに句点があれば、文の途中ではなく句点の直後で終えます。
         last_stop = max(candidate.rfind("。"), candidate.rfind("！"), candidate.rfind("？"))
         if last_stop >= max(1, limit // 2):
             return candidate[: last_stop + 1]
         return candidate[: max(1, limit - 1)].rstrip() + "…"
-

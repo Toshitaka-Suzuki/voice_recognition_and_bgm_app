@@ -1,3 +1,5 @@
+"""コマンドライン引数を受け取り、各部品を組み立ててアプリを起動する。"""
+
 from __future__ import annotations
 
 import argparse
@@ -14,10 +16,14 @@ from .tts import SpeechSynthesizer
 
 
 def project_root() -> Path:
+    """このファイルの位置を基準にプロジェクトのルートを返す。"""
+
     return Path(__file__).resolve().parents[2]
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """設定ファイルと会話例ファイルを指定できる引数解析器を作る。"""
+
     root = project_root()
     parser = argparse.ArgumentParser(description="チャンバラロボット会話アプリ")
     parser.add_argument(
@@ -36,16 +42,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """アプリを初期化して実行し、OSへ返す終了コードを返す。
+
+    ``argv``を省略すると実際のコマンドライン引数を使います。起動時の想定内
+    エラーは表示して終了コード1、Ctrl+Cは130、それ以外は0を返します。
+    """
+
     args = build_parser().parse_args(argv)
     try:
         settings = load_settings(args.settings.resolve())
         examples = load_conversation_examples(args.examples.resolve())
 
+        # 各専門部品を作り、設定や用語一覧を渡します。
         recorder = AudioRecorder(settings.audio)
         recognizer = SpeechRecognizer(settings.speech_recognition, examples.domain_terms)
         chat_backend = ChatBackend(settings.llm, examples.domain_terms)
         synthesizer = SpeechSynthesizer(settings.tts)
 
+        # 会話を始める前に、マイク・音声・LLM・認識モデルを順番に確認します。
         print("起動前チェックを実行しています...")
         microphone = recorder.check_device()
         print(f"マイク: {microphone}")
@@ -57,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         recognizer.load()
         print("起動前チェックが完了しました。")
 
+        # Controllerは専門部品の呼び出し順だけを担当します。
         controller = ConversationController(
             recorder=recorder,
             recognizer=recognizer,
@@ -77,5 +92,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # cli.pyを直接実行した場合にも、戻り値を終了コードとして利用します。
     raise SystemExit(main())
-

@@ -1,3 +1,5 @@
+"""JSON設定を読み込み、内容を検証してPythonのデータへ変換するモジュール。"""
+
 from __future__ import annotations
 
 import json
@@ -11,6 +13,8 @@ from .models import ConversationExample, ConversationExamples, ConversationPhase
 
 @dataclass(frozen=True)
 class AudioSettings:
+    """録音と無音判定に使用する設定値。"""
+
     sample_rate: int
     channels: int
     silence_seconds: float
@@ -26,6 +30,8 @@ class AudioSettings:
 
 @dataclass(frozen=True)
 class SpeechRecognitionSettings:
+    """faster-whisperのモデルと認識方法に関する設定値。"""
+
     model: str
     device: str
     compute_type: str
@@ -35,6 +41,8 @@ class SpeechRecognitionSettings:
 
 @dataclass(frozen=True)
 class LLMSettings:
+    """Ollamaへの接続とLLM生成に関する設定値。"""
+
     host: str
     model: str
     production_model: str
@@ -45,6 +53,8 @@ class LLMSettings:
 
 @dataclass(frozen=True)
 class TTSSettings:
+    """pyttsx3で使用する音声、速度、音量の設定値。"""
+
     voice_match: str
     rate: int
     volume: float
@@ -52,12 +62,16 @@ class TTSSettings:
 
 @dataclass(frozen=True)
 class QuestionSettings:
+    """作戦フェーズと感想フェーズで読み上げる質問文。"""
+
     strategy: str
     feedback: str
 
 
 @dataclass(frozen=True)
 class AppSettings:
+    """アプリ全体の設定を機能別にまとめたデータ。"""
+
     audio: AudioSettings
     speech_recognition: SpeechRecognitionSettings
     llm: LLMSettings
@@ -66,6 +80,12 @@ class AppSettings:
 
 
 def _read_json(path: Path) -> Any:
+    """UTF-8のJSONファイルを読み込む。
+
+    ファイルがない場合やJSON構文が不正な場合は、利用者向けの
+    :class:`ConfigurationError`へ変換します。
+    """
+
     try:
         with path.open("r", encoding="utf-8") as file:
             return json.load(file)
@@ -78,12 +98,16 @@ def _read_json(path: Path) -> Any:
 
 
 def _mapping(value: Any, label: str) -> dict[str, Any]:
+    """値がJSONオブジェクト、つまりPythonの辞書であることを確認する。"""
+
     if not isinstance(value, dict):
         raise ConfigurationError(f"{label} はJSONオブジェクトで指定してください。")
     return value
 
 
 def _string(data: dict[str, Any], key: str, label: str) -> str:
+    """辞書から空でない文字列を取り出し、前後の空白を除いて返す。"""
+
     value = data.get(key)
     if not isinstance(value, str) or not value.strip():
         raise ConfigurationError(f"{label}.{key} は空でない文字列で指定してください。")
@@ -91,6 +115,8 @@ def _string(data: dict[str, Any], key: str, label: str) -> str:
 
 
 def _number(data: dict[str, Any], key: str, label: str, *, minimum: float = 0) -> float:
+    """辞書から下限以上の数値を取り出し、``float``として返す。"""
+
     value = data.get(key)
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value < minimum:
         raise ConfigurationError(f"{label}.{key} は {minimum} 以上の数値で指定してください。")
@@ -98,6 +124,11 @@ def _number(data: dict[str, Any], key: str, label: str, *, minimum: float = 0) -
 
 
 def _integer(data: dict[str, Any], key: str, label: str, *, minimum: int = 1) -> int:
+    """辞書から下限以上の整数を取り出す。
+
+    Pythonでは``bool``も整数の一種なので、先に明示的に除外しています。
+    """
+
     value = data.get(key)
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise ConfigurationError(f"{label}.{key} は {minimum} 以上の整数で指定してください。")
@@ -105,6 +136,13 @@ def _integer(data: dict[str, Any], key: str, label: str, *, minimum: int = 1) ->
 
 
 def load_settings(path: Path) -> AppSettings:
+    """動作設定JSONを読み込み、検証済みの``AppSettings``を返す。
+
+    必須項目の不足や値の型・範囲が不正な場合は``ConfigurationError``を
+    発生させます。
+    """
+
+    # 最初に各大項目が辞書になっていることを確認します。
     root = _mapping(_read_json(path), "settings")
     audio = _mapping(root.get("audio"), "audio")
     speech = _mapping(root.get("speech_recognition"), "speech_recognition")
@@ -112,16 +150,19 @@ def load_settings(path: Path) -> AppSettings:
     tts = _mapping(root.get("tts"), "tts")
     questions = _mapping(root.get("questions"), "questions")
 
+    # input_deviceだけは、番号・名前・既定値(null)の3形式を許可します。
     input_device = audio.get("input_device")
     if input_device is not None and (
         isinstance(input_device, bool) or not isinstance(input_device, (int, str))
     ):
         raise ConfigurationError("audio.input_device は整数、文字列、または null で指定してください。")
 
+    # 音量は一般的なpyttsx3の範囲である0～1に限定します。
     volume = _number(tts, "volume", "tts", minimum=0)
     if volume > 1:
         raise ConfigurationError("tts.volume は0から1の範囲で指定してください。")
 
+    # 検証済みの辞書を、用途ごとのdataclassへ変換します。
     return AppSettings(
         audio=AudioSettings(
             sample_rate=_integer(audio, "sample_rate", "audio"),
@@ -170,6 +211,12 @@ def load_settings(path: Path) -> AppSettings:
 
 
 def load_conversation_examples(path: Path) -> ConversationExamples:
+    """会話例JSONを読み込み、用語とフェーズ別の例を返す。
+
+    JSONの版、必須フェーズ、各文字列を検証し、登録された会話例は
+    件数を制限せず記載順のまま保持します。
+    """
+
     root = _mapping(_read_json(path), "conversation_examples")
     version = root.get("version")
     if version != 1:
@@ -184,6 +231,7 @@ def load_conversation_examples(path: Path) -> ConversationExamples:
             raise ConfigurationError(f"domain_terms[{index}] は空でない文字列にしてください。")
         terms.append(term.strip())
 
+    # Enumから正しいフェーズ名の集合を作り、不足と未知項目を同時に調べます。
     raw_phases = _mapping(root.get("phases"), "phases")
     expected = {phase.value for phase in ConversationPhase}
     actual = set(raw_phases)
@@ -197,6 +245,7 @@ def load_conversation_examples(path: Path) -> ConversationExamples:
             details.append(f"未知: {', '.join(unknown)}")
         raise ConfigurationError(f"phases の項目が正しくありません ({'; '.join(details)})。")
 
+    # リストを不変のtupleへ変換し、JSONに書かれた順序を維持します。
     parsed: dict[ConversationPhase, tuple[ConversationExample, ...]] = {}
     for phase in ConversationPhase:
         raw_examples = raw_phases[phase.value]
@@ -214,4 +263,3 @@ def load_conversation_examples(path: Path) -> ConversationExamples:
         parsed[phase] = tuple(examples)
 
     return ConversationExamples(version=version, domain_terms=tuple(terms), phases=parsed)
-

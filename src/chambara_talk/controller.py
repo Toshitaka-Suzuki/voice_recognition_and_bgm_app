@@ -1,3 +1,5 @@
+"""質問・録音・認識確認・LLM・読み上げの順序を制御するモジュール。"""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -13,15 +15,24 @@ from .models import (
 
 
 class RecognitionConfirmation:
+    """認識結果を表示し、利用者がEnterまたはqを入力するまで待つ。"""
+
     def __init__(
         self,
         input_function: Callable[[str], str] = input,
         output: Callable[[str], None] = print,
     ) -> None:
+        """入力関数と出力関数を受け取る。
+
+        既定値は標準の``input``と``print``ですが、テストでは偽物へ差し替えます。
+        """
+
         self.input = input_function
         self.output = output
 
     def confirm(self, text: str) -> ConfirmationResult:
+        """認識文を表示し、確定または終了の選択結果を返す。"""
+
         self.output("\n認識結果:")
         self.output(text)
         self.output("")
@@ -35,6 +46,8 @@ class RecognitionConfirmation:
 
 
 class ConversationController:
+    """2つの会話フェーズを進め、専門部品を決められた順序で呼び出す。"""
+
     def __init__(
         self,
         *,
@@ -48,6 +61,12 @@ class ConversationController:
         input_function: Callable[[str], str] = input,
         output: Callable[[str], None] = print,
     ) -> None:
+        """録音・認識・LLM・読み上げ部品と会話設定を受け取る。
+
+        各部品を外から受け取る構造にすることで、テスト時にマイクやOllamaを
+        使わない偽物へ差し替えられます。
+        """
+
         self.recorder = recorder
         self.recognizer = recognizer
         self.chat_backend = chat_backend
@@ -63,6 +82,9 @@ class ConversationController:
         self.state = ConversationState.STRATEGY_RECORDING
 
     def run(self) -> bool:
+        """作戦、アトラクション待機、感想の順に進め、完了なら``True``を返す。"""
+
+        # フェーズごとの会話履歴は共有せず、各フェーズを独立して実行します。
         try:
             if not self._run_phase(ConversationPhase.STRATEGY):
                 return False
@@ -81,17 +103,25 @@ class ConversationController:
             return False
 
     def _run_phase(self, phase: ConversationPhase) -> bool:
+        """1フェーズ分の質問からコメント読み上げまでを行う。
+
+        qなら``False``、コメントまで完了すれば``True``を返します。録音・認識・
+        LLMの想定内エラーでは終了せず、同じフェーズの録音待機へ戻ります。
+        """
+
         self._set_recording_state(phase)
         question = self.questions[phase]
         self.output(f"\n{question}")
         self._speak_or_report(question)
 
+        # 正常なコメント生成まで、録音からの処理をやり直せるループです。
         while True:
             if self._wait_for_enter_or_quit(
                 "Enterで録音開始 / qで終了 > "
             ) == ConfirmationResult.QUIT:
                 return False
 
+            # 録音失敗や発話なしではLLMへ進まず、もう一度録音を待ちます。
             try:
                 audio = self.recorder.record_until_silence()
             except AudioError as exc:
@@ -115,10 +145,12 @@ class ConversationController:
                 self.output("認識結果が空でした。もう一度録音してください。")
                 continue
 
+            # ここでEnterが押されるまで、認識文はLLMへ渡されません。
             self._set_confirmation_state(phase)
             if self.confirmation.confirm(result.text) == ConfirmationResult.QUIT:
                 return False
 
+            # 現在フェーズの会話例だけを、件数制限せずLLMへ渡します。
             phase_examples = self.examples.phases[phase]
             self.output(f"LLMへ渡す会話例: {len(phase_examples)}件（{phase.value}）")
             self.output("コメントを生成しています...")
@@ -136,12 +168,16 @@ class ConversationController:
             return True
 
     def _speak_or_report(self, text: str) -> None:
+        """文章を読み上げ、失敗時は会話を止めずエラーを表示する。"""
+
         try:
             self.synthesizer.speak(text)
         except TTSError as exc:
             self.output(f"音声合成エラー: {exc}")
 
     def _wait_for_enter_or_quit(self, prompt: str) -> ConfirmationResult:
+        """Enterかqだけを受け付け、不正な入力では同じ案内を繰り返す。"""
+
         while True:
             choice = self.input(prompt).strip().casefold()
             if choice == "":
@@ -151,6 +187,8 @@ class ConversationController:
             self.output("Enterまたはqを入力してください。")
 
     def _set_recording_state(self, phase: ConversationPhase) -> None:
+        """フェーズに対応する録音待機状態へ変更する。"""
+
         self.state = (
             ConversationState.STRATEGY_RECORDING
             if phase == ConversationPhase.STRATEGY
@@ -158,9 +196,10 @@ class ConversationController:
         )
 
     def _set_confirmation_state(self, phase: ConversationPhase) -> None:
+        """フェーズに対応する認識確認状態へ変更する。"""
+
         self.state = (
             ConversationState.STRATEGY_CONFIRMATION
             if phase == ConversationPhase.STRATEGY
             else ConversationState.FEEDBACK_CONFIRMATION
         )
-

@@ -1,3 +1,5 @@
+"""音声エンジンをモックへ差し替え、読み上げ制御を確認するテスト。"""
+
 import unittest
 from unittest.mock import Mock, patch
 
@@ -7,11 +9,18 @@ from chambara_talk.tts import SpeechSynthesizer
 
 
 def settings() -> TTSSettings:
+    """各テストで使用する共通の音声設定を返す。"""
+
     return TTSSettings(voice_match="Haruka", rate=175, volume=1.0)
 
 
 class SpeechSynthesizerTests(unittest.TestCase):
+    """実際に音を出さず、pyttsx3へ正しく命令することを検証する。"""
+
     def test_four_consecutive_utterances_are_processed(self) -> None:
+        """質問とコメントの合計4回がすべて読み上げ処理されることを確認する。"""
+
+        # Mockは呼ばれたメソッド、引数、回数を記録する偽物のエンジンです。
         outputs = []
         engine = Mock()
         synthesizer = SpeechSynthesizer(settings(), output=outputs.append)
@@ -30,6 +39,8 @@ class SpeechSynthesizerTests(unittest.TestCase):
 
     @patch("chambara_talk.tts.metadata.version", return_value="2.99")
     def test_unsupported_pyttsx3_version_is_rejected(self, version: Mock) -> None:
+        """問題のあるpyttsx3 2.99を起動時に拒否することを確認する。"""
+
         del version
         synthesizer = SpeechSynthesizer(settings())
 
@@ -37,6 +48,8 @@ class SpeechSynthesizerTests(unittest.TestCase):
             synthesizer.load()
 
     def test_engine_error_is_reported_as_tts_error(self) -> None:
+        """音声エンジンの失敗が利用者向けTTSErrorになることを確認する。"""
+
         engine = Mock()
         engine.runAndWait.side_effect = RuntimeError("SAPI failure")
         synthesizer = SpeechSynthesizer(settings(), output=lambda message: None)
@@ -47,4 +60,5 @@ class SpeechSynthesizerTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    # このファイルを直接実行した場合にもテストを開始します。
     unittest.main()
