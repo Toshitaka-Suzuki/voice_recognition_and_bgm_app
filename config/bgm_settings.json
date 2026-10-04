@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "stages": [
+    {
+      "id": "easy",
+      "audio_file": "easy.ogg",
+      "parry_windows": [
+        {"start_ms": 1000, "end_ms": 1400},
+        {"start_ms": 3000, "end_ms": 3400},
+        {"start_ms": 5000, "end_ms": 5400},
+        {"start_ms": 10000, "end_ms": 10400},
+        {"start_ms": 15000, "end_ms": 15400},
+        {"start_ms": 20000, "end_ms": 20400},
+        {"start_ms": 25000, "end_ms": 25400},
+        {"start_ms": 30000, "end_ms": 30400},
+        {"start_ms": 35000, "end_ms": 35400}        
+      ]
+    },
+    {
+      "id": "normal",
+      "audio_file": "normal.ogg",
+      "parry_windows": [
+        {"start_ms": 1000, "end_ms": 1250},
+        {"start_ms": 3000, "end_ms": 3250},
+        {"start_ms": 5000, "end_ms": 5400},
+        {"start_ms": 10000, "end_ms": 10400},
+        {"start_ms": 15000, "end_ms": 15400},
+        {"start_ms": 20000, "end_ms": 20400},
+        {"start_ms": 25000, "end_ms": 25400},
+        {"start_ms": 30000, "end_ms": 30400},
+        {"start_ms": 35000, "end_ms": 35400} 
+      ]
+    },
+    {
+      "id": "hard",
+      "audio_file": "hard.ogg",
+      "parry_windows": [
+        {"start_ms": 1000, "end_ms": 1100},
+        {"start_ms": 3000, "end_ms": 3100},
+        {"start_ms": 5000, "end_ms": 5400},
+        {"start_ms": 10000, "end_ms": 10400},
+        {"start_ms": 15000, "end_ms": 15400},
+        {"start_ms": 20000, "end_ms": 20400},
+        {"start_ms": 25000, "end_ms": 25400},
+        {"start_ms": 30000, "end_ms": 30400},
+        {"start_ms": 35000, "end_ms": 35400}         
+      ]
+    }
+  ]
+}
