@@ -1,0 +1,2 @@
+# WebSocket dependency for this standalone sample only.
+websockets>=14,<18

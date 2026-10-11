@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebSocket 送受信サンプル</title>
+  <style>
+    /* 見た目だけの設定です。通信処理は下のscript内にあります。 */
+    body { font-family: system-ui, sans-serif; background: #f3f6fa; color: #16243b; margin: 0; padding: 24px; }
+    main { max-width: 800px; margin: auto; background: white; padding: 28px; border-radius: 12px; }
+    h1 { font-size: 1.6rem; }
+    button, input { font: inherit; padding: 10px; border: 1px solid #8d9aaa; border-radius: 6px; }
+    button { cursor: pointer; background: #edf3ff; }
+    button:disabled { cursor: default; opacity: .5; }
+    form { display: flex; gap: 8px; margin: 10px 0 24px; flex-wrap: wrap; }
+    input { flex: 1; min-width: 180px; }
+    #history { background: #142139; color: #eef4ff; padding: 16px; min-height: 160px; max-height: 400px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .hint { color: #4f6077; line-height: 1.7; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>WebSocket 送受信サンプル</h1>
+  <p class="hint">① 接続 → ② Pythonからの接続通知を受信 → ③ 文字を送信 → ④ Pythonの返信を受信</p>
+  <p>接続先：<code>ws://127.0.0.1:8765</code></p>
+  <p>状態：<strong id="status" role="status">未接続</strong></p>
+  <button id="connect" type="button">接続</button>
+  <button id="disconnect" type="button" disabled>切断</button>
+  <hr>
+  <label for="message">Pythonへ送る文字</label>
+  <form id="send-form">
+    <input id="message" value="こんにちは" autocomplete="off">
+    <button id="send" type="submit" disabled>送信</button>
+  </form>
+  <h2>通信履歴</h2>
+  <p class="hint">「送信」はブラウザーからPythonへ、「受信」はPythonからブラウザーへ。履歴は直近200行です。</p>
+  <pre id="history" aria-label="送受信したJSONの履歴"></pre>
+</main>
+<script>
+  // [B1] 準備：HTMLの操作部品を取得します。socketには現在の接続を保存します。
+  const status = document.getElementById('status');
+  const connectButton = document.getElementById('connect');
+  const disconnectButton = document.getElementById('disconnect');
+  const sendButton = document.getElementById('send');
+  const input = document.getElementById('message');
+  const history = document.getElementById('history');
+  let socket = null;
+  const lines = [];
+
+  function log(direction, content) {
+    lines.push(`[${new Date().toLocaleTimeString('ja-JP')}] ${direction} ${content}`);
+    if (lines.length > 200) lines.shift();
+    // textContentは文字として表示するため、<script>等を受信しても実行しません。
+    history.textContent = lines.join('\n');
+    history.scrollTop = history.scrollHeight;
+  }
+
+  // [B2] 状態表示：接続途中や切断後には送信ボタンを押せないようにします。
+  function updateControls() {
+    const state = socket?.readyState;
+    connectButton.disabled = socket !== null;
+    disconnectButton.disabled = state !== WebSocket.OPEN;
+    sendButton.disabled = state !== WebSocket.OPEN;
+  }
+
+  // [B3] 接続：new WebSocketは接続を開始します。完了はopenイベントで分かります。
+  connectButton.addEventListener('click', () => {
+    if (socket !== null) return;
+    const connection = new WebSocket('ws://127.0.0.1:8765');
+    socket = connection;
+    status.textContent = '接続中…';
+    updateControls();
+
+    connection.addEventListener('open', () => {
+      if (socket !== connection) return;
+      status.textContent = '接続済み';
+      log('接続', 'Pythonサーバーに接続しました。');
+      updateControls();
+    });
+
+    // [B4] ブラウザーの受信：Pythonが送るたびにmessageイベントが発生します。
+    connection.addEventListener('message', (event) => {
+      if (socket !== connection) return;
+      log('受信 ← Python', event.data);
+      try {
+        // event.dataはJSON文字列です。parseでJavaScriptのオブジェクトへ戻します。
+        const message = JSON.parse(event.data);
+        if (!message || !['connected', 'reply', 'error'].includes(message.type)
+            || typeof message.text !== 'string') {
+          log('形式エラー', '想定したtypeとtextを持つJSONではありません。');
+          return;
+        }
+        log('内容', message.text);
+      } catch {
+        log('形式エラー', 'PythonからのデータをJSONとして読めませんでした。');
+      }
+    });
+
+    // [B5] エラーと切断：再接続は利用者が接続ボタンを押したときだけ行います。
+    connection.addEventListener('error', () => {
+      if (socket !== connection) return;
+      status.textContent = '通信エラー';
+      log('エラー', 'Pythonサーバーの起動と接続先を確認してください。');
+    });
+    connection.addEventListener('close', (event) => {
+      if (socket !== connection) return;
+      socket = null;
+      status.textContent = '未接続';
+      log('切断', `接続を閉じました（コード：${event.code}）。`);
+      updateControls();
+    });
+  });
+
+  // [B6] ブラウザーの送信：文字入力をJSONに変換し、Pythonへ送ります。
+  document.getElementById('send-form').addEventListener('submit', (event) => {
+    event.preventDefault(); // 通常のフォーム送信によるページ再読み込みを止めます。
+    // ボタンの無効化に加え、送信の直前にも接続状態を確認します。
+    if (socket?.readyState !== WebSocket.OPEN) return;
+    const message = { type: 'message', text: input.value };
+    const text = JSON.stringify(message);
+    try {
+      socket.send(text);
+      // sendは送信を予約します。Pythonが受信したことは「返信」の到着で確認します。
+      log('送信 → Python', text);
+    } catch {
+      log('エラー', '送信できませんでした。接続状態を確認してください。');
+    }
+  });
+
+  // [B7] 終了：切断要求を出し、closeイベントで操作部品を未接続へ戻します。
+  disconnectButton.addEventListener('click', () => {
+    if (socket?.readyState !== WebSocket.OPEN) return;
+    socket.close(1000, '利用者が切断');
+    status.textContent = '切断中…';
+    updateControls();
+  });
+  window.addEventListener('pagehide', () => socket?.close());
+</script>
+</body>
+</html>
