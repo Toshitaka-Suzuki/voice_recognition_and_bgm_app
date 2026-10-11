@@ -40,7 +40,8 @@ class Game:
         self.player.play(self.track)
         self.accept_after = perf_counter()
         self.running = True
-        self.emit(Event("stage_changed", self.track.id))
+        self.emit(Event("stage_changed", self.track.id,
+                        reason=f"曲外の判定区間: {self.track.excluded_window_count}件除外"))
 
     def _accepts(self, timestamp, generation):
         return (self.running and timestamp >= self.accept_after

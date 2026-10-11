@@ -17,6 +17,7 @@ class Track:
     windows: tuple[Window, ...]
     samples: object
     sample_rate: int
+    excluded_window_count: int = 0
 
     @property
     def duration_ms(self):
@@ -69,12 +70,52 @@ def _load_audio(path: Path):
         raise ValueError(f"{path.name}: {exc}") from exc
 
 
+def _load_windows(stage, version, frames, rate):
+    """version 2の基準位置を実際の区間へ変換する。曲外は全体を除外。"""
+    offset, duration = 0, None
+    if version == 2:
+        offset, duration = stage["parry_offset_ms"], stage["parry_duration_ms"]
+        if type(offset) is not int:
+            raise ValueError(f"{stage['id']}: parry_offset_msは整数を指定してください")
+        if type(duration) is not int or duration <= 0:
+            raise ValueError(f"{stage['id']}: parry_duration_msは正の整数を指定してください")
+    items = stage["parry_windows"]
+    if not isinstance(items, list) or not items:
+        raise ValueError(f"{stage['id']}: 判定区間を配列で1件以上指定してください")
+    windows, excluded = [], 0
+    for item in items:
+        start = item["start_ms"]
+        if type(start) is not int or start < 0:
+            raise ValueError(f"{stage['id']}: start_msは非負の整数を指定してください")
+        if version == 2:
+            if "end_ms" in item:
+                raise ValueError(f"{stage['id']}: version 2ではend_msを指定できません")
+            start += offset
+            end = start + duration
+            if start < 0 or end * rate > frames * 1000:
+                excluded += 1
+                continue
+        else:
+            end = item["end_ms"]
+            if type(end) is not int or start >= end:
+                raise ValueError(f"{stage['id']}: 区間は非負の整数で開始 < 終了にしてください")
+            if end * rate > frames * 1000:
+                raise ValueError(f"{stage['id']}: 判定区間が曲の長さを超えています")
+        windows.append(Window(start, end))
+    if not windows:
+        raise ValueError(f"{stage['id']}: すべての判定区間が曲外のため除外されました")
+    windows.sort(key=lambda w: w.start_ms)
+    if any(a.end_ms > b.start_ms for a, b in zip(windows, windows[1:])):
+        raise ValueError(f"{stage['id']}: 判定区間が重複しています")
+    return tuple(windows), excluded
+
+
 def load_tracks(config_path: Path, audio_dir: Path) -> tuple[Track, ...]:
     """設定を検証し全曲をメモリへ展開する。パスはBGMフォルダ内に限定。"""
     try:
         data = json.loads(config_path.read_text(encoding="utf-8-sig"))
-        if type(data.get("version")) is not int or data["version"] != 1:
-            raise ValueError("versionは1を指定してください")
+        if type(data.get("version")) is not int or data["version"] not in (1, 2):
+            raise ValueError("versionは1または2を指定してください")
         stages = data["stages"]
         if not isinstance(stages, list) or [s["id"] for s in stages] != ["easy", "normal", "hard"]:
             raise ValueError("stagesはeasy、normal、hardの順に3件指定してください")
@@ -85,20 +126,8 @@ def load_tracks(config_path: Path, audio_dir: Path) -> tuple[Track, ...]:
             if not path.is_relative_to(root) or path.suffix.lower() not in (".wav", ".ogg"):
                 raise ValueError("音声はBGMフォルダ内のWAVまたはOGGを指定してください")
             samples, rate = _load_audio(path)
-            windows = []
-            for item in stage["parry_windows"]:
-                start, end = item["start_ms"], item["end_ms"]
-                if type(start) is not int or type(end) is not int or not 0 <= start < end:
-                    raise ValueError(f"{stage['id']}: 区間は非負の整数で開始 < 終了にしてください")
-                if end > len(samples) * 1000 / rate:
-                    raise ValueError(f"{stage['id']}: 判定区間が曲の長さを超えています")
-                windows.append(Window(start, end))
-            if not windows:
-                raise ValueError(f"{stage['id']}: 判定区間を1件以上指定してください")
-            windows.sort(key=lambda w: w.start_ms)
-            if any(a.end_ms > b.start_ms for a, b in zip(windows, windows[1:])):
-                raise ValueError(f"{stage['id']}: 判定区間が重複しています")
-            tracks.append(Track(stage["id"], tuple(windows), samples, rate))
+            windows, excluded = _load_windows(stage, data["version"], len(samples), rate)
+            tracks.append(Track(stage["id"], windows, samples, rate, excluded))
         return tuple(tracks)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, wave.Error, EOFError) as exc:
         raise ValueError(f"BGM設定の読み込みに失敗しました: {exc}") from exc

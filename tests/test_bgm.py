@@ -1,5 +1,7 @@
 """実デバイスを使わず設定、判定、DAC時刻、リソース解放を検証。"""
 import json
+import io
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -21,6 +23,11 @@ def tracks():
 
 
 class FakePlayer:
+    waiting_for_first_callback = True
+    synchronizing = False
+
+    def take_warning(self, now):
+        return None
     def __init__(self):
         self.current = (1, 0)
         self.played = []
@@ -109,6 +116,31 @@ class GameTests(unittest.TestCase):
         self.game.submit_parry(timestamp=1)
         self.assertEqual(len(self.events), count)
 
+    def test_life_accepted_but_parry_ignored_while_waiting(self):
+        self.player.current = None
+        count = len(self.events)
+        self.game.submit_parry(timestamp=1)
+        self.assertEqual(len(self.events), count)
+        with patch("chambara_bgm.engine.perf_counter", return_value=0):
+            self.game.submit_life_decrement(timestamp=1)
+        self.assertEqual(self.game.track.id, "normal")
+
+    def test_status_updates_do_not_emit_parry(self):
+        count = len(self.events)
+        for ms in range(1000):
+            self.player.current = (1, ms)
+            self.game.status(1)
+        self.assertEqual(len(self.events), count)
+
+    def test_stage_start_and_switch_report_excluded_count(self):
+        self.game.tracks = tuple(replace(t, excluded_window_count=i + 1)
+                                 for i, t in enumerate(self.game.tracks))
+        with patch("chambara_bgm.engine.perf_counter", return_value=0):
+            self.game.start()
+            self.assertEqual(self.events[-1].reason, "曲外の判定区間: 1件除外")
+            self.game.submit_life_decrement(timestamp=1)
+            self.assertEqual(self.events[-1].reason, "曲外の判定区間: 2件除外")
+
 
 class ConfigTests(unittest.TestCase):
     def setUp(self):
@@ -130,6 +162,94 @@ class ConfigTests(unittest.TestCase):
     def load(self):
         self.path.write_text(json.dumps(self.data), encoding="utf-8")
         return load_tracks(self.path, self.root)
+
+    def use_version2(self):
+        self.data["version"] = 2
+        for stage in self.data["stages"]:
+            stage["parry_offset_ms"] = 0
+            stage["parry_duration_ms"] = 100
+            stage["parry_windows"] = [{"start_ms": w["start_ms"]} for w in stage["parry_windows"]]
+
+    def test_version2_matches_version1_with_same_duration(self):
+        old = self.load()
+        self.use_version2()
+        new = self.load()
+        self.assertEqual([t.windows for t in old], [t.windows for t in new])
+        self.assertEqual([t.excluded_window_count for t in new], [0, 0, 0])
+
+    def test_version2_per_stage_offsets_and_durations(self):
+        self.use_version2()
+        for stage, offset, duration in zip(self.data["stages"], (50, -50, 0), (200, 150, 300)):
+            stage["parry_offset_ms"] = offset
+            stage["parry_duration_ms"] = duration
+        self.assertEqual([t.windows for t in self.load()],
+                         [(Window(150, 350),), (Window(50, 200),), (Window(100, 400),)])
+
+    def test_version2_excludes_whole_windows_at_edges(self):
+        self.use_version2()
+        stage = self.data["stages"][0]
+        stage["parry_duration_ms"] = 200
+        stage["parry_windows"] = [{"start_ms": n} for n in (0, 400, 800)]
+        stage["parry_offset_ms"] = -50
+        track = self.load()[0]
+        self.assertEqual(track.windows, (Window(350, 550), Window(750, 950)))
+        self.assertEqual(track.excluded_window_count, 1)
+        stage["parry_offset_ms"] = 50
+        track = self.load()[0]
+        self.assertEqual(track.windows, (Window(50, 250), Window(450, 650)))
+        self.assertEqual(track.excluded_window_count, 1)
+        stage["parry_offset_ms"] = 0
+        self.assertEqual(self.load()[0].windows[-1], Window(800, 1000))
+        self.assertEqual(self.load()[0].excluded_window_count, 0)
+
+    def test_version2_invalid_offset_and_duration(self):
+        self.use_version2()
+        stage = self.data["stages"][0]
+        for field, values in [("parry_offset_ms", [True, 1.5, "50", None]),
+                              ("parry_duration_ms", [True, 0, -1, 1.5, "200", None])]:
+            original = stage[field]
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    stage[field] = value
+                    with self.assertRaisesRegex(ValueError, field):
+                        self.load()
+            stage[field] = original
+
+    def test_version2_rejects_end_ms_even_on_excluded_window(self):
+        self.use_version2()
+        stage = self.data["stages"][0]
+        stage["parry_offset_ms"] = -500
+        stage["parry_windows"][0]["end_ms"] = 200
+        with self.assertRaisesRegex(ValueError, "end_ms"):
+            self.load()
+
+    def test_version2_rejects_all_excluded_and_overlaps(self):
+        self.use_version2()
+        stage = self.data["stages"][0]
+        stage["parry_offset_ms"] = -1000
+        with self.assertRaisesRegex(ValueError, "すべて.*除外"):
+            self.load()
+        stage["parry_offset_ms"] = 1000
+        with self.assertRaisesRegex(ValueError, "すべて.*除外"):
+            self.load()
+        stage["parry_offset_ms"] = 0
+        stage["parry_duration_ms"] = 200
+        stage["parry_windows"] = [{"start_ms": 0}, {"start_ms": 100}]
+        with self.assertRaisesRegex(ValueError, "重複"):
+            self.load()
+
+    def test_version2_missing_fields_and_bad_starts(self):
+        self.use_version2()
+        stage = self.data["stages"][0]
+        for field in ("parry_offset_ms", "parry_duration_ms"):
+            value = stage.pop(field)
+            with self.assertRaises(ValueError):
+                self.load()
+            stage[field] = value
+        for value in (-1, True, 1.5, "100"):
+            stage["parry_windows"] = [{"start_ms": value}]
+            with self.assertRaisesRegex(ValueError, "start_ms"):
+                self.load()
 
     def test_load_three_tracks(self):
         result = self.load()
@@ -309,6 +429,7 @@ class PlayerTests(unittest.TestCase):
         self.assertTrue(old.aborted and old.closed)
         self.assertIsNone(self.player.position(100.055))
         self.assertEqual(self.player.frames_sent, 0)
+        self.assertTrue(self.player.waiting_for_first_callback)
 
     def test_output_error_stale_clock_and_inactive(self):
         self.callback()
@@ -340,9 +461,59 @@ class PlayerTests(unittest.TestCase):
         self.assertTrue(stream.closed)
 
     def test_no_callback_timeout(self):
-        with patch("chambara_bgm.player.perf_counter", return_value=100.5):
-            with self.assertRaisesRegex(RuntimeError, "更新が停止"):
-                self.player.position(100.5)
+        for now in (100.5, 104.999):
+            with patch("chambara_bgm.player.perf_counter", return_value=now):
+                self.assertIsNone(self.player.position(now))
+        with patch("chambara_bgm.player.perf_counter", return_value=105):
+            with self.assertRaisesRegex(RuntimeError, "初回音声コールバック.*未受信"):
+                self.player.position(105)
+
+    def test_slow_device_preparation_does_not_consume_initial_timeout(self):
+        def factory(**kwargs):
+            self.clock_value = 100.6
+            return FakeStream(**kwargs)
+        self.clock_value = 100
+        with patch("chambara_bgm.player.perf_counter", side_effect=lambda: self.clock_value):
+            player = AudioPlayer(factory)
+            self.addCleanup(player.stop)
+            player.play(self.track)
+            self.assertEqual(player.started_at, 100.6)
+            self.assertIsNone(player.position(100.6))
+
+    def test_callback_during_start_preserved(self):
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            def start():
+                stream.active = True
+                stream.callback(np.empty((16, 1), dtype=np.float32), 16,
+                                SimpleNamespace(outputBufferDacTime=10.05), "")
+            stream.start = start
+            return stream
+        player = AudioPlayer(factory)
+        self.addCleanup(player.stop)
+        player.play(self.track)
+        self.assertFalse(player.waiting_for_first_callback)
+        self.assertEqual(len(player.anchors), 1)
+        self.assertIsNotNone(player.position(100.055))
+
+    def test_late_initial_callback_then_running_timeout(self):
+        with patch("chambara_bgm.player.perf_counter", return_value=100.8):
+            self.player.stream.time = 10.8
+            self.player._callback(np.empty((16, 1), dtype=np.float32), 16,
+                                  SimpleNamespace(outputBufferDacTime=10.8), "")
+            self.assertIsNotNone(self.player.position(100.8))
+        with patch("chambara_bgm.player.perf_counter", return_value=101.3):
+            with self.assertRaisesRegex(RuntimeError, "更新が停止.*受信済み"):
+                self.player.position(101.3)
+
+    def test_error_during_initial_wait_is_immediate(self):
+        self.player.error = "音声出力異常: underflow"
+        with self.assertRaisesRegex(RuntimeError, "underflow.*初回受信: 未受信"):
+            self.player.position(100)
+        self.player.error = None
+        self.player.stream.active = False
+        with self.assertRaisesRegex(RuntimeError, "ストリームが停止"):
+            self.player.position(100)
 
     def test_grace_boundary_and_unknown_position(self):
         self.callback()
@@ -379,6 +550,94 @@ class PlayerTests(unittest.TestCase):
         self.player._callback(output, 8,
                               SimpleNamespace(outputBufferDacTime=10.09, currentTime=10.08), "")
         self.assertIsNotNone(self.player.position(100.091))
+
+    @staticmethod
+    def underflow_flags():
+        import sounddevice as sd
+        flags = sd.CallbackFlags()
+        flags.output_underflow = True
+        return flags
+
+    def test_underflow_fills_audio_and_recovers_on_next_dac_block(self):
+        self.callback()
+        flags = self.underflow_flags()
+        output = self.callback(status=flags)
+        np.testing.assert_array_equal(output[:, 0], (np.arange(16) + 16) % 10)
+        self.assertIsNone(self.player.error)
+        self.assertEqual(self.player.frames_sent, 32)
+        self.assertEqual(self.player.underflow_count, 1)
+        self.assertTrue(self.player.synchronizing)
+        self.assertIsNone(self.player.position(100.055))
+        self.player._callback(np.empty((8, 1), dtype=np.float32), 8,
+                              SimpleNamespace(outputBufferDacTime=10.2), "")
+        self.assertIsNone(self.player.position(100.199))
+        self.assertTrue(self.player.synchronizing)
+        loop, ms = self.player.position(100.2)
+        self.assertEqual(loop, 4)
+        self.assertAlmostEqual(ms, 2)
+        self.assertFalse(self.player.synchronizing)
+
+    def test_repeated_underflows_throttle_warnings_and_reset_on_switch(self):
+        flags = self.underflow_flags()
+        with patch("builtins.print") as printed:
+            self.callback(status=flags)
+            self.assertIn("1回", self.player.take_warning(100))
+            self.callback(status=flags)
+            self.assertIsNone(self.player.take_warning(100.9))
+            self.assertIn("2回", self.player.take_warning(101))
+            self.assertIsNone(self.player.take_warning(102))
+            printed.assert_not_called()
+        self.assertEqual(self.player.frames_sent, 32)
+        self.assertIsNone(self.player.position(100.055))
+        self.player.play(self.track)
+        self.assertEqual(self.player.underflow_count, 0)
+        self.assertFalse(self.player.synchronizing)
+        self.assertIsNone(self.player.take_warning(103))
+
+    def test_mixed_and_other_flags_remain_fatal(self):
+        for mixed in (False, True):
+            flags = self.underflow_flags()
+            flags.output_underflow = mixed
+            flags.output_overflow = True
+            self.player.play(self.track)
+            self.callback(status=flags)
+            with self.assertRaisesRegex(RuntimeError, "output overflow"):
+                self.player.position(100.055)
+            self.assertEqual(self.player.frames_sent, 0)
+
+    def test_recovery_does_not_repeat_successful_window(self):
+        track = tracks()[0]
+        self.player.play(track)
+        events = []
+        game = Game((track,) * 3, self.player, events.append)
+        with patch("chambara_bgm.engine.perf_counter", return_value=100):
+            game.start()
+        self.player._callback(np.empty((150, 1), dtype=np.float32), 150,
+                              SimpleNamespace(outputBufferDacTime=10), "")
+        game.submit_parry(100.12)
+        self.assertEqual(events[-1].kind, "parry_success")
+        self.player._callback(np.empty((20, 1), dtype=np.float32), 20,
+                              SimpleNamespace(outputBufferDacTime=10.15), self.underflow_flags())
+        count = len(events)
+        game.submit_parry(100.16)
+        self.assertEqual(len(events), count)
+        self.player._callback(np.empty((20, 1), dtype=np.float32), 20,
+                              SimpleNamespace(outputBufferDacTime=10.17), "")
+        game.submit_parry(100.18)
+        self.assertEqual(events[-1].kind, "parry_failure")
+
+    def test_underflow_does_not_disable_callback_timeout(self):
+        self.callback(status=self.underflow_flags())
+        with patch("chambara_bgm.player.perf_counter", return_value=100.5):
+            with self.assertRaisesRegex(RuntimeError, "更新が停止.*アンダーフロー回数: 1"):
+                self.player.position(100.5)
+
+    def test_callback_exception_remains_fatal(self):
+        self.player.track = Track("easy", (), np.empty((0, 1), dtype=np.float32), 1000)
+        output = self.callback()
+        np.testing.assert_array_equal(output, np.zeros((16, 1)))
+        with self.assertRaisesRegex(RuntimeError, "音声再生に失敗"):
+            self.player.position(100.055)
 
 
 class KeyboardTests(unittest.TestCase):
@@ -430,7 +689,7 @@ class CliTests(unittest.TestCase):
              patch("chambara_bgm.cli.sleep"), \
              patch("chambara_bgm.cli.perf_counter", return_value=1), \
              patch("chambara_bgm.engine.perf_counter", return_value=0), \
-             patch("builtins.print"), \
+             patch("sys.stdout", new_callable=io.StringIO), \
              patch.object(keyboard, "close") as close:
             result = main()
         close.assert_called_once()
