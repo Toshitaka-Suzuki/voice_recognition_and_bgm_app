@@ -404,3 +404,44 @@ python -m unittest discover -s tests -v
 - 最後の`OK`：すべて成功
 
 テストを読むときは、`test_`で始まるメソッド名、準備、実行、`assert...`による確認の順に見ると理解しやすくなります。
+
+## 21. Copilot SDKと非同期処理
+
+公式の`github-copilot-sdk`はPythonからCopilotを使うための追加ライブラリです。必要なPCだけで導入できます。
+
+```bash
+source .venv/Scripts/activate
+python -m pip install -e ".[copilot]"
+python -m copilot download-runtime
+copilot login
+python -m chambara_talk --settings config/settings.copilot.json
+```
+
+`.[copilot]`の角括弧は、`pyproject.toml`に定義された追加依存グループを指定しています。通常の`pip install -e .`ではCopilot SDKは入りません。
+
+SDKの通信には`async def`と`await`を使います。
+
+```python
+async def _check_model(self):
+    client = await self._ensure_client()
+    auth = await client.get_auth_status()
+```
+
+`async def`の関数を呼ぶと、すぐに結果を返す代わりに「これから実行する非同期処理」を作ります。`await`は通信の完了を待つ間、同じイベントループ内の他の処理へ実行を譲ります。SDKはこの間にも応答イベントや子プロセスの出力を受け取ります。
+
+本アプリのControllerは同期処理なので、`asyncio.Runner`を境界にします。
+
+```python
+self._runner = asyncio.Runner()
+result = self._runner.run(operation)
+```
+
+Runnerは専用のイベントループを保持します。同じループでSDKの起動、生成、停止を行うため、非同期SDKを通常の`generate()`から利用できます。
+
+`asyncio.wait_for()`は時間制限を設けます。ただし待機のキャンセルだけではクラウド側の生成が続く場合があるため、`session.abort()`も呼びます。`finally`は成功でも失敗でも実行されるので、セッション削除やプロセス停止に使用します。
+
+`AsyncMock`はawaitされる関数の偽物です。通常のMockと違い、`assert_awaited_once()`で実際にawaitされたことを確認できます。`test_copilot.py`では、この仕組みで利用枠を消費せずに期限切れや空応答を再現します。
+
+CopilotのセッションIDには標準ライブラリ`uuid`を使い、作業フォルダには`tempfile.TemporaryDirectory`を使います。UUIDは会話ごとに別のIDを作るので、作戦・感想や再録音の履歴を混ぜずに扱えます。
+
+クラウドへ送る文章は、`json.dumps(messages, ensure_ascii=False)`で日本語を含むJSON文字列へ変換します。送信するのはEnterで確定した認識文と会話例・用語・指示です。録音音声は送信しませんが、SDK側やGitHub側の保持は完全には保証できません。データの扱いはREADMEのCopilot説明を確認してください。

@@ -1,0 +1,712 @@
+"""
+Minimal async JSON-RPC 2.0 client for stdio transport
+
+This uses threading to handle blocking IO in an async-friendly way.
+Much simpler and more reliable than pure asyncio subprocess.
+"""
+
+import asyncio
+import inspect
+import json
+import logging
+import threading
+import time
+import uuid
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+from ._diagnostics import elapsed_ms
+
+logger = logging.getLogger(__name__)
+
+
+class JsonRpcError(Exception):
+    """JSON-RPC error response"""
+
+    def __init__(self, code: int, message: str, data: Any = None):
+        self.code = code
+        self.message = message
+        self.data = data
+        super().__init__(f"JSON-RPC Error {code}: {message}")
+
+
+class ProcessExitedError(Exception):
+    """Error raised when the CLI process exits unexpectedly"""
+
+    pass
+
+
+class _RequestCancelledError(Exception):
+    """Raised when the peer cancels an incoming request."""
+
+
+RequestHandler = Callable[[dict], dict | Awaitable[dict]]
+RawRequestHandler = Callable[[dict], None | Awaitable[None]]
+
+
+class _IncomingRequestCancellation:
+    def __init__(self) -> None:
+        self._cancelled = False
+        self._callbacks: list[Callable[[], None]] = []
+        self._lock = threading.Lock()
+
+    def cancel(self) -> None:
+        with self._lock:
+            if self._cancelled:
+                return
+            self._cancelled = True
+            callbacks = list(self._callbacks)
+            self._callbacks.clear()
+        for callback in callbacks:
+            callback()
+
+    def bind_event(self, loop: asyncio.AbstractEventLoop) -> asyncio.Event:
+        event = asyncio.Event()
+
+        def set_event() -> None:
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(event.set)
+
+        with self._lock:
+            if self._cancelled:
+                cancelled = True
+            else:
+                self._callbacks.append(set_event)
+                cancelled = False
+        if cancelled:
+            event.set()
+        return event
+
+
+def _log_request_timing(
+    level: int,
+    start: float,
+    method: str,
+    request_id: str,
+    status: str,
+    *,
+    exc_info: bool = False,
+) -> None:
+    if logger.isEnabledFor(level):
+        logger.log(
+            level,
+            "JsonRpcClient.request JSON-RPC request finished",
+            extra={
+                "elapsed_ms": elapsed_ms(start),
+                "method": method,
+                "request_id": request_id,
+                "status": status,
+            },
+            exc_info=exc_info,
+        )
+
+
+class JsonRpcClient:
+    """
+    Minimal async JSON-RPC 2.0 client for stdio transport
+
+    Uses threads for blocking IO but provides async interface.
+    """
+
+    def __init__(self, process):
+        """
+        Create client from subprocess.Popen with stdin/stdout pipes
+
+        Args:
+            process: subprocess.Popen with stdin=PIPE, stdout=PIPE
+        """
+        self.process = process
+        self.pending_requests: dict[str, asyncio.Future] = {}
+        self._pending_inline_callbacks: dict[str, Callable[[Any], None]] = {}
+        self.notification_handler: Callable[[str, dict], None] | None = None
+        self.notification_method_handlers: dict[str, Callable[[dict], Any]] = {}
+        self.request_handlers: dict[str, RequestHandler] = {}
+        self._cancellable_request_methods: set[str] = set()
+        self.raw_request_handlers: dict[str, RawRequestHandler] = {}
+        self._incoming_request_cancellations: dict[int, _IncomingRequestCancellation] = {}
+        self._running = False
+        self._read_thread: threading.Thread | None = None
+        self._stderr_thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._write_lock = threading.Lock()
+        self._transport_closed = False
+        self._pending_lock = threading.Lock()
+        self._process_exit_error: str | None = None
+        self._stderr_output: list[str] = []
+        self._stderr_lock = threading.Lock()
+        self.on_close: Callable[[], None] | None = None
+
+    def start(self, loop: asyncio.AbstractEventLoop | None = None):
+        """Start listening for messages in background thread"""
+        if not self._running:
+            self._running = True
+            # Always use the provided loop or get the running loop
+            self._loop = loop or asyncio.get_running_loop()
+            self._read_thread = threading.Thread(target=self._read_loop, daemon=True)
+            # Register stderr before stdout can reach EOF and latch a terminal error.
+            if hasattr(self.process, "stderr") and self.process.stderr:
+                self._stderr_thread = threading.Thread(target=self._stderr_loop, daemon=True)
+                self._stderr_thread.start()
+            self._read_thread.start()
+
+    def _stderr_loop(self):
+        """Read stderr in background to capture error messages"""
+        try:
+            while self._running:
+                if not self.process.stderr:
+                    break
+                line = self.process.stderr.readline()
+                if not line:
+                    break
+                stderr_line = line.decode("utf-8") if isinstance(line, bytes) else line
+                logger.warning("[CLI] %s", stderr_line.rstrip())
+                with self._stderr_lock:
+                    self._stderr_output.append(stderr_line)
+        except Exception:
+            logger.debug("Error reading Copilot CLI stderr", exc_info=True)
+
+    def get_stderr_output(self) -> str:
+        """Get captured stderr output"""
+        with self._stderr_lock:
+            return "".join(self._stderr_output).strip()
+
+    async def stop(self):
+        """Stop listening and clean up"""
+        self._running = False
+        if self._read_thread:
+            self._read_thread.join(timeout=1.0)
+        if self._stderr_thread:
+            self._stderr_thread.join(timeout=1.0)
+
+    async def request(
+        self,
+        method: str,
+        params: dict | None = None,
+        timeout: float | None = None,
+        *,
+        on_response_inline: Callable[[Any], None] | None = None,
+    ) -> Any:
+        """
+        Send a JSON-RPC request and wait for the response.
+
+        Args:
+            method: Method name
+            params: Optional parameters
+            timeout: Optional request timeout in seconds. If None (default),
+                waits indefinitely for the server to respond.
+            on_response_inline: Optional synchronous callback invoked from the
+                reader thread the instant a successful response is parsed,
+                before the awaiter's future is scheduled on the event loop.
+                Use this to perform state mutations (for example, registering
+                a server-assigned session id) that must be visible before any
+                subsequent notification on the same connection is dispatched.
+                The callback receives the parsed JSON result. If the callback
+                raises, the exception is propagated to the awaiter.
+
+        Returns:
+            The result from the response
+
+        Raises:
+            JsonRpcError: If the server returns an error
+            ProcessExitedError: If the transport has closed
+            asyncio.TimeoutError: If the request times out (only when timeout is set)
+        """
+        request_start = time.perf_counter()
+        request_id = str(uuid.uuid4())
+
+        # Use the stored loop to ensure consistency with the reader thread
+        if not self._loop:
+            raise RuntimeError("Client not started. Call start() first.")
+
+        with self._pending_lock:
+            if self._process_exit_error is not None:
+                raise ProcessExitedError(self._process_exit_error)
+            future = self._loop.create_future()
+            self.pending_requests[request_id] = future
+            if on_response_inline is not None:
+                self._pending_inline_callbacks[request_id] = on_response_inline
+
+        message = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": params or {},
+        }
+
+        try:
+            await self._send_message(message)
+            if timeout is not None:
+                result = await asyncio.wait_for(future, timeout=timeout)
+            else:
+                result = await future
+        except asyncio.CancelledError:
+            _log_request_timing(logging.DEBUG, request_start, method, request_id, "canceled")
+            raise
+        except Exception:
+            _log_request_timing(
+                logging.WARNING,
+                request_start,
+                method,
+                request_id,
+                "failed",
+                exc_info=True,
+            )
+            raise
+        else:
+            _log_request_timing(logging.DEBUG, request_start, method, request_id, "succeeded")
+            return result
+        finally:
+            with self._pending_lock:
+                self.pending_requests.pop(request_id, None)
+                self._pending_inline_callbacks.pop(request_id, None)
+            # A write failure and the reader's failure sweep can complete independently.
+            future.add_done_callback(
+                lambda completed: None if completed.cancelled() else completed.exception()
+            )
+
+    async def notify(self, method: str, params: dict | None = None):
+        """
+        Send a JSON-RPC notification (no response expected).
+
+        Args:
+            method: Method name
+            params: Optional parameters
+
+        Raises:
+            ProcessExitedError: If the transport has closed
+        """
+        message = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params or {},
+        }
+        await self._send_message(message)
+
+    def set_notification_handler(self, handler: Callable[[str, dict], None]):
+        """Set the handler for incoming notifications from the server."""
+        self.notification_handler = handler
+
+    def set_notification_method_handler(self, method: str, handler: Callable[[dict], Any] | None):
+        """Register a handler for a specific server-to-client notification method.
+
+        Notifications carry no ``id`` and expect no response, so they are
+        dispatched separately from request handlers. A registered method
+        handler takes precedence over the generic notification handler. The
+        handler may be a coroutine function; its result is awaited.
+        """
+        if handler is None:
+            self.notification_method_handlers.pop(method, None)
+        else:
+            self.notification_method_handlers[method] = handler
+
+    def set_request_handler(
+        self, method: str, handler: RequestHandler | None, *, cancellable: bool = False
+    ):
+        """Register a handler for incoming requests of ``method``.
+
+        When ``cancellable`` is true, a ``$/cancelRequest`` for a pending request
+        cancels the handler's task and fails the request with code -32800.
+        """
+        if handler is None:
+            self.request_handlers.pop(method, None)
+            self._cancellable_request_methods.discard(method)
+        else:
+            self.request_handlers[method] = handler
+            if cancellable:
+                self._cancellable_request_methods.add(method)
+            else:
+                self._cancellable_request_methods.discard(method)
+
+    def set_raw_request_handler(self, method: str, handler: RawRequestHandler | None):
+        """Register a request handler that receives the full JSON-RPC message.
+
+        Raw handlers are responsible for sending their own response. Use this
+        for request lifecycles that depend on the JSON-RPC request id.
+        """
+        if handler is None:
+            self.raw_request_handlers.pop(method, None)
+        else:
+            self.raw_request_handlers[method] = handler
+
+    def incoming_request_cancelled_event(self, request_id: Any) -> asyncio.Event:
+        """Return the ``$/cancelRequest`` event for a pending numeric request id."""
+        if self._loop is None:
+            raise RuntimeError("Client not started. Call start() first.")
+        if not isinstance(request_id, int) or isinstance(request_id, bool):
+            return asyncio.Event()
+        with self._pending_lock:
+            signal = self._incoming_request_cancellations.get(request_id)
+        if signal is None:
+            return asyncio.Event()
+        return signal.bind_event(self._loop)
+
+    async def _send_message(self, message: dict):
+        """Send a JSON-RPC message with a Content-Length header."""
+        loop = self._loop or asyncio.get_event_loop()
+
+        def write():
+            if hasattr(self.process, "poll") and self.process.poll() is not None:
+                raise ProcessExitedError(self._get_process_exit_error())
+            content = json.dumps(message, separators=(",", ":"))
+            content_bytes = content.encode("utf-8")
+            header = f"Content-Length: {len(content_bytes)}\r\n\r\n"
+            with self._write_lock:
+                if self._transport_closed:
+                    with self._pending_lock:
+                        error_msg = self._process_exit_error
+                    raise ProcessExitedError(error_msg or self._get_process_exit_error())
+                try:
+                    self.process.stdin.write(header.encode("utf-8"))
+                    self.process.stdin.write(content_bytes)
+                    self.process.stdin.flush()
+                except (BrokenPipeError, OSError, ValueError) as exc:
+                    raise ProcessExitedError(self._get_process_exit_error()) from exc
+
+        # Run in thread pool to avoid blocking
+        await loop.run_in_executor(None, write)
+
+    def _read_loop(self):
+        """Read messages from the stream (runs in thread)"""
+        try:
+            while self._running:
+                message = self._read_message()
+                if message:
+                    self._handle_message(message)
+                else:
+                    # No message means stream closed - process likely exited
+                    break
+        except EOFError:
+            # Stream closed - check if process exited
+            pass
+        except Exception:
+            if self._running:
+                logger.warning("Failed to parse incoming JSON-RPC message", exc_info=True)
+
+        # Process exited or read failed - fail all pending requests
+        if self._running:
+            logger.debug("JSON-RPC read loop ended")
+            self._fail_pending_requests()
+            if self.on_close is not None:
+                self.on_close()
+
+    def _fail_pending_requests(self):
+        """Latch transport closure and fail all pending requests."""
+        with self._write_lock:
+            self._transport_closed = True
+        error_msg = self._get_process_exit_error()
+
+        # Fail all pending requests
+        with self._pending_lock:
+            # Prevent requests from registering after this final failure sweep.
+            self._process_exit_error = error_msg
+            for request_id, future in list(self.pending_requests.items()):
+                if not future.done():
+                    exc = ProcessExitedError(error_msg)
+                    loop = future.get_loop()
+                    loop.call_soon_threadsafe(future.set_exception, exc)
+
+    def _get_process_exit_error(self) -> str:
+        """Build an error message after the process and stderr readers finish."""
+        if self._stderr_thread and self._stderr_thread is not threading.current_thread():
+            self._stderr_thread.join(timeout=1.0)
+
+        stderr_output = self.get_stderr_output()
+        return_code = None
+        if hasattr(self.process, "poll"):
+            return_code = self.process.poll()
+
+        if stderr_output:
+            return f"CLI process exited with code {return_code}\nstderr: {stderr_output}"
+        if return_code is not None:
+            return f"CLI process exited with code {return_code}"
+        return "CLI process exited unexpectedly"
+
+    def _read_exact(self, num_bytes: int) -> bytes:
+        """
+        Read exactly num_bytes, handling partial/short reads from pipes.
+
+        Args:
+            num_bytes: Number of bytes to read
+
+        Returns:
+            Bytes read from stream
+
+        Raises:
+            EOFError: If stream ends before reading all bytes
+        """
+        chunks = []
+        remaining = num_bytes
+        while remaining > 0:
+            chunk = self.process.stdout.read(remaining)
+            if not chunk:
+                raise EOFError("Unexpected end of stream while reading JSON-RPC message")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    def _read_message(self) -> dict | None:
+        """
+        Read a single JSON-RPC message with a Content-Length header (blocking).
+
+        Returns:
+            Parsed JSON message, or None if the connection is closed.
+        """
+        # Read header line
+        header_line = self.process.stdout.readline()
+        if not header_line:
+            return None
+
+        # Parse Content-Length
+        header = header_line.decode("utf-8").strip()
+        if not header.startswith("Content-Length:"):
+            return None
+
+        content_length = int(header.split(":")[1].strip())
+
+        # Read empty line
+        self.process.stdout.readline()
+
+        # Read exact content using loop to handle short reads
+        content_bytes = self._read_exact(content_length)
+        content = content_bytes.decode("utf-8")
+
+        return json.loads(content)
+
+    def _handle_message(self, message: dict):
+        """Handle an incoming message (response or notification)"""
+        # Check if it's a response to our request
+        if "id" in message:
+            with self._pending_lock:
+                future = self.pending_requests.get(message["id"])
+                inline_cb = self._pending_inline_callbacks.pop(message["id"], None)
+
+            if future is not None:
+                loop = future.get_loop()
+
+                if "error" in message:
+                    error = message["error"]
+                    exc = JsonRpcError(
+                        error.get("code", -1),
+                        error.get("message", "Unknown error"),
+                        error.get("data"),
+                    )
+                    loop.call_soon_threadsafe(future.set_exception, exc)
+                elif "result" in message:
+                    result = message["result"]
+                    # Invoke the inline callback synchronously in the reader
+                    # thread so any state it mutates is visible before the next
+                    # message (e.g. a session.event notification) is dispatched.
+                    if inline_cb is not None:
+                        try:
+                            inline_cb(result)
+                        except Exception as exc:  # pylint: disable=broad-except
+                            logger.warning(
+                                "Inline response callback for request %s raised",
+                                message["id"],
+                                exc_info=True,
+                            )
+                            loop.call_soon_threadsafe(future.set_exception, exc)
+                            return
+                    loop.call_soon_threadsafe(future.set_result, result)
+                else:
+                    exc = ValueError("Invalid JSON-RPC response")
+                    loop.call_soon_threadsafe(future.set_exception, exc)
+                return
+
+        # Check if it's a notification from the server
+        if "method" in message and "id" not in message:
+            method = message["method"]
+            params = message.get("params", {})
+            if method == "$/cancelRequest":
+                self._handle_cancel_request(params)
+                return
+            handler = self.notification_method_handlers.get(method)
+            if handler is not None and self._loop:
+                # Method-specific notification handler takes precedence.
+                self._loop.call_soon_threadsafe(self._dispatch_notification, handler, params)
+                return
+            if self.notification_handler and self._loop:
+                # Schedule notification handler on the event loop for thread safety
+                self._loop.call_soon_threadsafe(self.notification_handler, method, params)
+            return
+
+        # Otherwise handle as incoming request (tool.call, etc.)
+        if "method" in message and "id" in message:
+            self._handle_request(message)
+
+    def _handle_request(self, message: dict):
+        method = message.get("method", "")
+        request_id = message.get("id")
+        cancellation_id: int | None = None
+        if isinstance(request_id, int) and not isinstance(request_id, bool):
+            with self._pending_lock:
+                self._incoming_request_cancellations[request_id] = _IncomingRequestCancellation()
+                cancellation_id = request_id
+        raw_handler = self.raw_request_handlers.get(method)
+        if raw_handler is not None:
+            if not self._loop:
+                return
+            asyncio.run_coroutine_threadsafe(
+                self._dispatch_raw_request(message, raw_handler, cancellation_id),
+                self._loop,
+            )
+            return
+        handler = self.request_handlers.get(method)
+        if not handler:
+            if cancellation_id is not None:
+                with self._pending_lock:
+                    self._incoming_request_cancellations.pop(cancellation_id, None)
+            if self._loop:
+                asyncio.run_coroutine_threadsafe(
+                    self._send_error_response(
+                        message["id"], -32601, f"Method not found: {message['method']}", None
+                    ),
+                    self._loop,
+                )
+            return
+        if not self._loop:
+            return
+        asyncio.run_coroutine_threadsafe(
+            self._dispatch_request(
+                message,
+                handler,
+                cancellation_id,
+                cancellable=method in self._cancellable_request_methods,
+            ),
+            self._loop,
+        )
+
+    def _handle_cancel_request(self, params: dict) -> None:
+        cancel_id = params.get("id") if isinstance(params, dict) else None
+        if not isinstance(cancel_id, int) or isinstance(cancel_id, bool):
+            return
+        with self._pending_lock:
+            signal = self._incoming_request_cancellations.get(cancel_id)
+        if signal is not None:
+            signal.cancel()
+
+    def _dispatch_notification(self, handler: Callable[[dict], Any], params: dict):
+        """Invoke a method-specific notification handler. Runs on the event loop;
+        coroutine results are scheduled and any error is logged (notifications
+        carry no response, so failures never propagate to the server)."""
+        try:
+            outcome = handler(params)
+        except Exception:  # pylint: disable=broad-except
+            logger.warning("Notification handler raised", exc_info=True)
+            return
+        if inspect.isawaitable(outcome):
+
+            async def _await_outcome():
+                try:
+                    await outcome
+                except Exception:  # pylint: disable=broad-except
+                    logger.warning("Notification handler raised", exc_info=True)
+
+            asyncio.create_task(_await_outcome())
+
+    async def _dispatch_raw_request(
+        self, message: dict, handler: RawRequestHandler, cancellation_id: int | None
+    ):
+        try:
+            outcome = handler(message)
+            if inspect.isawaitable(outcome):
+                await outcome
+        except Exception:  # pylint: disable=broad-except
+            logger.debug(
+                "Error handling raw JSON-RPC method %s",
+                message.get("method", ""),
+                exc_info=True,
+            )
+            await self._send_error_response(message["id"], -32603, "Internal error", None)
+        finally:
+            if cancellation_id is not None:
+                with self._pending_lock:
+                    self._incoming_request_cancellations.pop(cancellation_id, None)
+
+    async def _dispatch_request(
+        self,
+        message: dict,
+        handler: RequestHandler,
+        cancellation_id: int | None,
+        *,
+        cancellable: bool = False,
+    ):
+        try:
+            params = message.get("params", {})
+            outcome = handler(params)
+            if inspect.isawaitable(outcome):
+                if cancellable and cancellation_id is not None:
+                    outcome = await self._await_cancellable(outcome, cancellation_id)
+                else:
+                    outcome = await outcome
+            if outcome is not None and not isinstance(
+                outcome, dict | list | str | int | float | bool
+            ):
+                raise ValueError(
+                    "Request handler must return a JSON-serializable value, "
+                    f"got {type(outcome).__name__}"
+                )
+            await self._send_response(message["id"], outcome)
+        except _RequestCancelledError:
+            logger.debug("JSON-RPC method %s cancelled", message.get("method", ""))
+            await self._send_error_response(message["id"], -32800, "Request cancelled", None)
+        except JsonRpcError as exc:
+            logger.debug(
+                "Error handling JSON-RPC method %s: %s", message.get("method", ""), exc.message
+            )
+            await self._send_error_response(message["id"], exc.code, exc.message, exc.data)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.debug(
+                "Error handling JSON-RPC method %s: %s",
+                message.get("method", ""),
+                str(exc),
+                exc_info=True,
+            )
+            await self._send_error_response(message["id"], -32603, str(exc), None)
+        finally:
+            if cancellation_id is not None:
+                with self._pending_lock:
+                    self._incoming_request_cancellations.pop(cancellation_id, None)
+
+    async def _await_cancellable(self, outcome: Awaitable[Any], cancellation_id: int) -> Any:
+        """Await ``outcome``, cancelling it if the peer cancels the request."""
+        with self._pending_lock:
+            signal = self._incoming_request_cancellations.get(cancellation_id)
+        if signal is None or self._loop is None:
+            return await outcome
+        task = asyncio.ensure_future(outcome)
+        waiter = asyncio.ensure_future(signal.bind_event(self._loop).wait())
+        try:
+            await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        except BaseException:
+            task.cancel()
+            raise
+        finally:
+            waiter.cancel()
+        if task.done():
+            return task.result()
+        task.cancel()
+        await asyncio.wait({task})
+        raise _RequestCancelledError()
+
+    async def _send_response(self, request_id: str, result: Any):
+        response = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": result,
+        }
+        await self._send_message(response)
+
+    async def _send_error_response(
+        self, request_id: str, code: int, message: str, data: dict | None
+    ):
+        response = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {
+                "code": code,
+                "message": message,
+                "data": data,
+            },
+        }
+        await self._send_message(response)

@@ -41,7 +41,7 @@ class SpeechRecognitionSettings:
 
 @dataclass(frozen=True)
 class LLMSettings:
-    """Ollamaへの接続とLLM生成に関する設定値。"""
+    """LLMの接続先と生成設定。provider省略時は既存のOllamaを使う。"""
 
     host: str
     model: str
@@ -49,6 +49,7 @@ class LLMSettings:
     timeout_seconds: float
     temperature: float
     max_response_chars: int
+    provider: str = "ollama"
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,11 @@ def load_settings(path: Path) -> AppSettings:
     tts = _mapping(root.get("tts"), "tts")
     questions = _mapping(root.get("questions"), "questions")
 
+    # 既存JSONとの互換性を保ち、接続先の誤記は起動時に検出します。
+    provider = llm.get("provider", "ollama")
+    if provider not in ("ollama", "copilot"):
+        raise ConfigurationError("llm.provider は ollama または copilot を指定してください。")
+
     # input_deviceだけは、番号・名前・既定値(null)の3形式を許可します。
     input_device = audio.get("input_device")
     if input_device is not None and (
@@ -191,12 +197,13 @@ def load_settings(path: Path) -> AppSettings:
             beam_size=_integer(speech, "beam_size", "speech_recognition"),
         ),
         llm=LLMSettings(
-            host=_string(llm, "host", "llm"),
-            model=_string(llm, "model", "llm"),
-            production_model=_string(llm, "production_model", "llm"),
+            host=_string(llm, "host", "llm") if provider == "ollama" else "",
+            model=_string(llm, "model", "llm") if "model" in llm or provider == "ollama" else "auto",
+            production_model=_string(llm, "production_model", "llm") if provider == "ollama" else "",
             timeout_seconds=_number(llm, "timeout_seconds", "llm", minimum=1),
             temperature=_number(llm, "temperature", "llm", minimum=0),
             max_response_chars=_integer(llm, "max_response_chars", "llm"),
+            provider=provider,
         ),
         tts=TTSSettings(
             voice_match=_string(tts, "voice_match", "tts"),

@@ -1,4 +1,4 @@
-"""OllamaのローカルLLMへ会話例と認識文を渡し、コメントを生成する。"""
+"""会話例と認識文からコメントを生成する共通処理とOllama接続。"""
 
 from __future__ import annotations
 
@@ -19,6 +19,11 @@ class ChatBackend:
         self.settings = settings
         self.domain_terms = tuple(domain_terms)
         self._client: Any = None
+
+    def close(self) -> None:
+        """共通の終了インターフェース。Ollamaは子プロセスを所有しない。"""
+
+        self._client = None
 
     def _get_client(self):  # noqa: ANN202
         """Ollamaクライアントを必要になった時点で1度だけ作成して返す。"""
@@ -165,3 +170,16 @@ class ChatBackend:
         if last_stop >= max(1, limit // 2):
             return candidate[: last_stop + 1]
         return candidate[: max(1, limit - 1)].rstrip() + "…"
+
+
+def create_chat_backend(settings: LLMSettings, domain_terms: Sequence[str]) -> ChatBackend:
+    """接続先に対応するバックエンドを作る。自動フォールバックはしない。"""
+
+    if settings.provider == "ollama":
+        return ChatBackend(settings, domain_terms)
+    if settings.provider == "copilot":
+        # オプション依存はCopilotが選ばれた時だけ読み込みます。
+        from .copilot_backend import CopilotChatBackend
+
+        return CopilotChatBackend(settings, domain_terms)
+    raise LLMError("未対応のLLM接続先です。ollamaまたはcopilotを指定してください。")

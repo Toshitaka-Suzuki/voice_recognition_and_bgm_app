@@ -11,7 +11,7 @@
 - 音声認識結果は画面に表示し、Enterで確定されるまでLLMへ送らない
 - 録音した音声、認識文、返答をファイルへ保存しない
 
-処理はすべてローカルPC上で行います。faster-whisperが音声を文章へ変換し、Ollama上のLLMが返答を作り、pyttsx3が返答を読み上げます。
+faster-whisperが音声を文章へ変換し、LLMが返答を作り、pyttsx3が返答を読み上げます。LLMはOllamaのローカル実行とGitHub Copilotのクラウド実行から選べます。音声認識と読み上げはどちらの場合もPC上で実行します。クラウド側やSDKの一時保存については後述します。
 
 ## 2. フォルダ構成
 
@@ -42,7 +42,8 @@ voice_recognition_app/
 | `controller.py` | 質問、録音、認識、確認、LLM、読み上げの順序を管理する |
 | `audio.py` | マイク録音、環境音測定、発話と無音の判定を行う |
 | `speech.py` | faster-whisperで音声を日本語へ変換する |
-| `llm.py` | Ollamaへ送るメッセージを作り、コメントを取得する |
+| `llm.py` | 共通メッセージ・短縮処理、Ollama接続、接続先の選択 |
+| `copilot_backend.py` | Copilot SDKの非同期通信とセッションの後片付け |
 | `tts.py` | Windowsの日本語音声で質問とコメントを読み上げる |
 | `errors.py` | 機能ごとのエラー型を定義する |
 
@@ -95,7 +96,7 @@ faster-whisperで認識
         └─ Enter → 確定
         │
         ▼
-現在フェーズの全会話例と認識文をOllamaへ送る
+現在フェーズの全会話例と認識文を選択したLLMへ送る
         │
         ├─ LLM失敗 → 録音待機へ戻る
         ▼
@@ -138,7 +139,7 @@ faster-whisperの認識結果はジェネレーターです。`list(segments)`�
 
 ## 7. LLMコメント生成
 
-`ChatBackend.build_messages()`は、Ollamaへ送るメッセージを次の順番で作ります。
+`ChatBackend.build_messages()`は、両接続先で共通のメッセージを次の順番で作ります。
 
 1. 侍風、文字数、安全性などを指示するシステムメッセージ
 2. 現在のフェーズに登録された会話例すべて
@@ -198,10 +199,11 @@ JSONにはコメントを書けないため、項目の意味をここで説明�
 | `audio.input_device` | マイク番号・名前。`null`は既定マイク |
 | `speech_recognition.*` | モデル、実行装置、量子化、言語、beam size |
 | `llm.host` | Ollamaの接続先 |
-| `llm.model` | 実際に使うOllamaモデル |
+| `llm.provider` | `ollama`または`copilot`。省略時は`ollama` |
+| `llm.model` | 実際に使うモデル。Copilotの既定値は`auto` |
 | `llm.production_model` | 本番用として記録しているモデル名 |
-| `llm.timeout_seconds` | Ollama応答の待ち時間 |
-| `llm.temperature` | 返答の変化量を調整する値 |
+| `llm.timeout_seconds` | LLM確認・応答の待ち時間 |
+| `llm.temperature` | Ollamaの返答の変化量を調整する値（Copilotでは未使用） |
 | `llm.max_response_chars` | 返答の最大文字数 |
 | `tts.voice_match` | Windows音声名を探す文字列 |
 | `tts.rate` / `tts.volume` | 読み上げ速度と音量 |
@@ -264,3 +266,27 @@ JSONにはコメントを書けないため、項目の意味をここで説明�
 | 読み上げ音声・速度・音量 | `settings.json`の`tts` |
 
 変更後は、JSONのカンマや引用符が正しいことを確認し、単体テストを実行してください。
+
+## 15. Copilotバックエンドの仕組み
+
+`create_chat_backend()`は`llm.provider`を見て、従来の`ChatBackend`または`CopilotChatBackend`を作ります。Copilot側は共通のプロンプト・生成・短縮処理を継承し、起動確認と通信メソッドを置き換えます。Controllerは接続先の違いを意識せず`generate()`を呼べます。
+
+```text
+Controller（同期）
+    ↓ generate()
+共通メッセージ・短縮処理
+    ↓ _chat()
+Copilot専用asyncio.Runner
+    ↓ SDK管理のローカルランタイム
+GitHub Copilot（クラウドで生成）
+```
+
+各生成で新しいUUIDのセッションを作り、システム指示を設定します。会話例と今回の発話はrole付きJSON配列として全件を順番に送ります。応答後はセッションを切断・削除します。短縮依頼も独立したセッションです。
+
+ファイル操作などのツール、設定探索、カスタム指示、履歴検索、メモリは無効です。権限要求が届いても拒否します。SDKの標準認証を使うため普段のCopilotログインを利用できますが、既存のCopilot会話を変更することはありません。
+
+タイムアウト時は生成を中断してからセッションを削除します。`cli.main()`の`finally`はq、Ctrl+C、起動失敗を含むすべての経路で`close()`を呼び、残った所有セッションの削除を再試行し、ランタイムと専用ループを停止します。
+
+クラウドへは認識確定後の文章とプロンプトだけを送り、録音音声は送りません。アプリ独自のログは作成しませんが、SDK/CLIの一時保存・ログやGitHub側の保持が完全にないとは保証できません。CPU用設定は`config/settings.copilot.json`です。起動手順はREADMEを参照してください。
+
+`test_copilot.py`はSDKを偽物へ差し替えて異常系を検証し、`test_talk_cli.py`は終了時の解放を検証します。実サービスを呼ぶ単体テストはありません。

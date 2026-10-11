@@ -1,6 +1,6 @@
 # チャンバラロボット会話アプリ
 
-6軸ロボットアームを使ったチャンバラアトラクション向けの、ローカル音声会話プロトタイプです。音声認識結果をコンソールで確認し、Enterで確定した場合だけローカルLLMへ送ります。
+6軸ロボットアームを使ったチャンバラアトラクション向けの音声会話プロトタイプです。音声認識結果をコンソールで確認し、Enterで確定した場合だけLLMへ送ります。LLMはローカルのOllama、またはクラウドのGitHub Copilotを選べます。
 
 ## 会話の流れ
 
@@ -11,7 +11,7 @@
 5. LLMのコメントを表示・読み上げます。
 6. アトラクション終了後にEnterを押し、「感想」について同じ処理を行います。
 
-音声、認識文、返答、ログはファイルへ保存しません。
+アプリ独自の音声、認識文、返答、ログはファイルへ保存しません。Copilot SDK側の一時保存については、下記のクラウド利用時の説明を確認してください。
 
 ## プログラムを理解したい方へ
 
@@ -38,7 +38,7 @@ BGM再生とパリイ判定だけを試す独立アプリもあります。
 - Windows 10または11（64bit）
 - Python 3.11（64bit）
 - 入力マイク
-- [Ollama](https://ollama.com/) とローカルLLM
+- [Ollama](https://ollama.com/) とローカルLLM、またはGitHub Copilotの利用権限とインターネット接続
 - Windowsの日本語音声 `Microsoft Haruka Desktop - Japanese`
 
 現在の開発PC向け既定モデルは `qwen2.5:3b`、高性能な本番PC向けモデルは `gpt-oss:20b` です。
@@ -70,7 +70,41 @@ python -m chambara_talk
 chambara-talk
 ```
 
-初回はfaster-whisperモデルの取得が発生します。モデル取得後の会話処理はローカルで完結します。
+初回はfaster-whisperモデルの取得が発生します。Ollamaモードではモデル取得後の会話処理はローカルで完結します。
+
+### GPUなしのPCでGitHub Copilotを使う
+
+公式Python SDKを使い、LLM生成をCopilot側で実行します。VS Codeの拡張機能への入力操作は不要です。Ollamaの起動・モデル取得も不要です。
+
+Git Bashで、アプリ用仮想環境を有効にして追加依存をインストールします。
+
+```bash
+source .venv/Scripts/activate
+python -m pip install -e ".[copilot]"
+python -m copilot download-runtime
+copilot login
+python -m chambara_talk --settings config/settings.copilot.json
+```
+
+`copilot login`は導入済みCopilot CLIで行います。ログイン済みの場合は再ログイン不要です。SDKは互換性のあるランタイムを管理します。CLIと同じWindowsユーザーで起動してください。SDK 1.0.19へ固定しています。
+
+サンドボックス検証環境を使用する場合は、上記の有効化行を`source .sandbox-venv/Scripts/activate`へ変更してください。
+
+`settings.copilot.json`は音声認識を`small`・`cpu`・`int8`にしているためCUDAは不要です。録音と読み上げはこれまでどおりPC上で実行します。CPUでは認識に時間がかかる場合があります。
+
+- `llm.provider`：`ollama`または`copilot`。省略時は`ollama`
+- `llm.model`：Copilotでは既定値`auto`。明示モデルは起動時に利用可能か確認
+- `llm.timeout_seconds`：起動確認・各生成の待ち時間。既定値120秒
+- `llm.max_response_chars`：共通の返答文字数上限。既定値80文字
+- `llm.temperature`：Ollama用。Copilot SDKは同じ生成設定を公開していないためCopilotでは使用しない
+
+Copilotが失敗した場合は日本語エラーを表示し、録音待機へ戻ります。自動でOllamaへ切り替えることはありません。従来のローカル方式へ戻す場合は、`--settings`を省略して起動します。
+
+クラウドへ送信するのは、Enterで確定した認識文、現在フェーズの会話例全件、用語一覧、システム指示です。録音音声は送信しません。通常は各フェーズ1回ずつ生成し、80文字超の応答では短縮のため1回追加生成します。これらはCopilotの利用枠を消費します。
+
+SDKの履歴検索・メモリ・ツール・設定探索を無効化し、各生成後にアプリが作ったセッションをSDKから削除します。既存のCopilot会話やログイン情報は削除しません。空の一時作業フォルダは終了時に削除します。SDK/CLIが生成するログや異常終了時のデータ残存、GitHub側の保持は完全には保証できません。クラウド方式はこの前提を許容するデバッグ用です。
+
+詳しくは[公式SDK](https://github.com/github/copilot-sdk)と[認証説明](https://docs.github.com/en/copilot/how-tos/copilot-sdk/auth/authenticate)を参照してください。
 
 ### pyttsx3 2.99が導入済みの場合
 
@@ -98,7 +132,8 @@ python -m pip install --force-reinstall "pyttsx3==2.98"
 - `audio.input_device`: マイク番号または名前。`null` はWindowsの既定マイク
 - `speech_recognition.model`: faster-whisperモデル（既定値 `small`）
 - `speech_recognition.device`: `auto`、`cpu`、`cuda` など
-- `llm.model`: 実際にOllamaで使用するモデル
+- `llm.provider`: LLMの接続先。省略時は`ollama`
+- `llm.model`: 選択した接続先で使用するモデル
 - `tts.voice_match`: Windows音声名から検索する文字列
 
 高性能PCでgpt-oss-20bを使用する場合は、次を実行します。
@@ -135,6 +170,10 @@ python -m unittest discover -s tests -v
 ## トラブルシューティング
 
 - Ollamaへ接続できない場合は、Ollamaが起動しているか確認してください。
+- Copilot SDKがない場合は、仮想環境で`python -m pip install -e ".[copilot]"`を実行してください。
+- Copilot未認証の場合は`copilot login`を実行してください。SDK起動時にも認証を確認します。
+- Copilotのモデル不適合では、表示された利用可能モデルを指定するか`llm.model`を`auto`へ戻してください。
+- Copilotの利用枠・権限エラーはGitHubの契約や組織ポリシー、タイムアウトは通信状態を確認してください。
 - モデルがない場合は、表示された `ollama pull ...` コマンドを実行してください。
 - 日本語音声がない場合は、Windowsの「時刻と言語」から日本語の音声機能を追加してください。
 - 騒音で録音が早く終わる、または始まらない場合は、`minimum_rms_threshold` と `noise_multiplier` を調整してください。

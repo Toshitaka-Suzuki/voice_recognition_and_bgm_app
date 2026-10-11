@@ -17,6 +17,9 @@ dependencies = [
     "soundfile>=0.13.1,<1",
 ]
 
+[project.optional-dependencies]
+copilot = ["github-copilot-sdk==1.0.19"]
+
 [project.scripts]
 chambara-talk = "chambara_talk.cli:main"
 chambara-bgm = "chambara_bgm.cli:main"
