@@ -22,7 +22,9 @@
 <main>
   <h1>WebSocket 送受信サンプル</h1>
   <p class="hint">① 接続 → ② Pythonからの接続通知を受信 → ③ 文字を送信 → ④ Pythonの返信を受信</p>
-  <p>接続先：<code>ws://127.0.0.1:8765</code></p>
+  <label for="endpoint">WebSocket接続先</label>
+  <p><input id="endpoint" type="text" value="ws://127.0.0.1:8765" style="width:100%;box-sizing:border-box" spellcheck="false"></p>
+  <p class="hint">別PCの場合は、Python側PCの有線LANのIPv4アドレスを入力します（例：ws://192.168.10.10:8765）。</p>
   <p>状態：<strong id="status" role="status">未接続</strong></p>
   <button id="connect" type="button">接続</button>
   <button id="disconnect" type="button" disabled>切断</button>
@@ -32,6 +34,24 @@
     <input id="message" value="こんにちは" autocomplete="off">
     <button id="send" type="submit" disabled>送信</button>
   </form>
+  <h2>入力信号をPythonへ送信</h2>
+  <p class="hint">どの信号も任意の順番で繰り返し送れます。</p>
+  <div id="signals">
+    <button type="button" data-signal="game_start" disabled>ゲームスタート</button>
+    <button type="button" data-signal="battle_start" disabled>戦闘開始</button>
+    <button type="button" data-signal="parry" disabled>パリイ</button>
+    <button type="button" data-signal="battle_end" disabled>戦闘終了</button>
+  </div>
+  <label for="count">弱点残り回数</label>
+  <form id="count-form" novalidate>
+    <input id="count" type="number" min="0" max="9007199254740991" step="1" value="3">
+    <button id="send-count" type="submit" disabled>残り回数を送信</button>
+  </form>
+  <h2>Pythonからの出力信号</h2>
+  <p>最後に受信した状態：<strong id="last-status">未受信</strong></p>
+  <p>最後に受信したパリイ結果：<strong id="last-parry">未受信</strong></p>
+  <p>受付通知：<span id="receipt" role="status">未受信</span></p>
+  <p class="hint">Python側のターミナルで1〜5を押すと状態、6・7でパリイ結果が届きます。入力信号とは独立しています。</p>
   <h2>通信履歴</h2>
   <p class="hint">「送信」はブラウザーからPythonへ、「受信」はPythonからブラウザーへ。履歴は直近200行です。</p>
   <pre id="history" aria-label="送受信したJSONの履歴"></pre>
@@ -39,11 +59,23 @@
 <script>
   // [B1] 準備：HTMLの操作部品を取得します。socketには現在の接続を保存します。
   const status = document.getElementById('status');
+  const endpoint = document.getElementById('endpoint');
   const connectButton = document.getElementById('connect');
   const disconnectButton = document.getElementById('disconnect');
   const sendButton = document.getElementById('send');
   const input = document.getElementById('message');
   const history = document.getElementById('history');
+  const countInput = document.getElementById('count');
+  const lastStatus = document.getElementById('last-status');
+  const lastParry = document.getElementById('last-parry');
+  const receipt = document.getElementById('receipt');
+  const statusLabels = {
+    standby: 'スタンバイ', pre_interview: '開始前インタビュー',
+    pre_interview_finished: '開始前インタビュー終了', post_interview: '終了インタビュー',
+    post_interview_finished: '終了インタビュー終了',
+  };
+  const resultLabels = { success: 'パリイ成功', failure: 'パリイ失敗' };
+  const signalNames = ['game_start', 'battle_start', 'parry', 'weak_point_count', 'battle_end'];
   let socket = null;
   const lines = [];
 
@@ -59,22 +91,48 @@
   function updateControls() {
     const state = socket?.readyState;
     connectButton.disabled = socket !== null;
+    endpoint.disabled = socket !== null; // 接続途中・接続中・切断途中は変更できません。
     disconnectButton.disabled = state !== WebSocket.OPEN;
     sendButton.disabled = state !== WebSocket.OPEN;
+    document.getElementById('send-count').disabled = state !== WebSocket.OPEN;
+    document.querySelectorAll('[data-signal]').forEach(button => {
+      button.disabled = state !== WebSocket.OPEN;
+    });
   }
 
   // [B3] 接続：new WebSocketは接続を開始します。完了はopenイベントで分かります。
   connectButton.addEventListener('click', () => {
     if (socket !== null) return;
-    const connection = new WebSocket('ws://127.0.0.1:8765');
+    // [B8] 接続先の検証：空欄やHTTPのURLを、通信を始める前に知らせます。
+    let connection;
+    try {
+      const address = endpoint.value.trim();
+      if (!address) throw new Error('WebSocket接続先を入力してください。');
+      const url = new URL(address);
+      if (!['ws:', 'wss:'].includes(url.protocol) || !url.hostname || url.hash
+          || url.username || url.password) {
+        throw new Error('ws:// または wss:// の接続先を入力してください（認証情報・#は使用できません）。');
+      }
+      // コンストラクターも不正なURLでは例外を出すため、同じtry内で扱います。
+      connection = new WebSocket(url.href);
+    } catch (error) {
+      status.textContent = '接続先エラー';
+      // URLやWebSocketが出す標準エラーも、日本語の案内に置き換えます。
+      log('入力エラー', error instanceof TypeError || error.name === 'SyntaxError'
+        ? 'URLの形式が正しくありません。例：ws://192.168.10.10:8765'
+        : error.message);
+      updateControls();
+      return;
+    }
     socket = connection;
+    lastStatus.textContent = lastParry.textContent = receipt.textContent = '未受信';
     status.textContent = '接続中…';
     updateControls();
 
     connection.addEventListener('open', () => {
       if (socket !== connection) return;
       status.textContent = '接続済み';
-      log('接続', 'Pythonサーバーに接続しました。');
+      log('接続', `Pythonサーバーに接続しました：${connection.url}`);
       updateControls();
     });
 
@@ -85,12 +143,32 @@
       try {
         // event.dataはJSON文字列です。parseでJavaScriptのオブジェクトへ戻します。
         const message = JSON.parse(event.data);
+        // [B9] 出力信号の受信：値を表示名へ変換し、最新の受信結果を表示します。
+        if (message?.type === 'status' && Object.hasOwn(statusLabels, message.value)) {
+          lastStatus.textContent = statusLabels[message.value];
+          log('状態通知', lastStatus.textContent);
+          return;
+        }
+        if (message?.type === 'parry_result' && Object.hasOwn(resultLabels, message.value)) {
+          lastParry.textContent = resultLabels[message.value];
+          log('判定結果', lastParry.textContent);
+          return;
+        }
+        if (message?.type === 'received' && signalNames.includes(message.name)
+            && typeof message.text === 'string'
+            && (message.name !== 'weak_point_count'
+                || (Number.isSafeInteger(message.count) && message.count >= 0))) {
+          receipt.textContent = message.text;
+          log('受付通知', message.text);
+          return;
+        }
         if (!message || !['connected', 'reply', 'error'].includes(message.type)
             || typeof message.text !== 'string') {
           log('形式エラー', '想定したtypeとtextを持つJSONではありません。');
           return;
         }
         log('内容', message.text);
+        if (message.type === 'error') receipt.textContent = message.text;
       } catch {
         log('形式エラー', 'PythonからのデータをJSONとして読めませんでした。');
       }
@@ -105,8 +183,9 @@
     connection.addEventListener('close', (event) => {
       if (socket !== connection) return;
       socket = null;
+      lastStatus.textContent = lastParry.textContent = receipt.textContent = '未受信';
       status.textContent = '未接続';
-      log('切断', `接続を閉じました（コード：${event.code}）。`);
+      log('切断', `${connection.url} を閉じました（コード：${event.code}）。`);
       updateControls();
     });
   });
@@ -114,17 +193,38 @@
   // [B6] ブラウザーの送信：文字入力をJSONに変換し、Pythonへ送ります。
   document.getElementById('send-form').addEventListener('submit', (event) => {
     event.preventDefault(); // 通常のフォーム送信によるページ再読み込みを止めます。
+    sendMessage({ type: 'message', text: input.value });
+  });
+
+  // [B10] 共通の送信：文字と信号でJSON変換・接続確認・ログ表示を共有します。
+  function sendMessage(message) {
     // ボタンの無効化に加え、送信の直前にも接続状態を確認します。
     if (socket?.readyState !== WebSocket.OPEN) return;
-    const message = { type: 'message', text: input.value };
     const text = JSON.stringify(message);
     try {
       socket.send(text);
       // sendは送信を予約します。Pythonが受信したことは「返信」の到着で確認します。
-      log('送信 → Python', text);
+      log(`送信 → Python (${socket.url})`, text);
     } catch {
       log('エラー', '送信できませんでした。接続状態を確認してください。');
     }
+  }
+
+  // [B11] 入力信号：ボタンを押した時点で、その信号を1回送ります。
+  document.querySelectorAll('[data-signal]').forEach(button => {
+    button.addEventListener('click', () => sendMessage({ type: 'signal', name: button.dataset.signal }));
+  });
+  document.getElementById('count-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    if (socket?.readyState !== WebSocket.OPEN) return;
+    const count = countInput.valueAsNumber;
+    // 空欄・負数・小数・正確に表せない大きな値は送信しません。
+    if (!Number.isSafeInteger(count) || count < 0) {
+      receipt.textContent = '残り回数は0〜9007199254740991の整数で入力してください。';
+      log('入力エラー', receipt.textContent);
+      return;
+    }
+    sendMessage({ type: 'signal', name: 'weak_point_count', count });
   });
 
   // [B7] 終了：切断要求を出し、closeイベントで操作部品を未接続へ戻します。
