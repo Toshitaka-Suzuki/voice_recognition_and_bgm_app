@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from importlib import metadata
 from collections.abc import Callable
+import time
 from typing import Any
 
 from .config import TTSSettings
@@ -78,18 +79,36 @@ class SpeechSynthesizer:
         except Exception as exc:
             raise TTSError(f"音声合成を初期化できません: {exc}") from exc
 
-    def speak(self, text: str) -> None:
+    def speak(self, text: str, *, cancel_event=None) -> bool:
         """文章を読み上げ、完了するまで待つ。
 
         ``runAndWait``が終わるまで戻らないため、次の画面へ進む前に読み上げが
-        完了します。失敗した場合は``TTSError``を発生させます。
+        完了します。統合アプリでは短い間隔でキャンセルを確認し、中断時は
+        ``False``を返します。失敗した場合は``TTSError``を発生させます。
         """
 
         self.load()
         try:
+            if cancel_event is not None and cancel_event.is_set():
+                return False
             self.output(f"音声読み上げ開始: {text}")
             self._engine.say(text)
-            self._engine.runAndWait()
+            if cancel_event is None:
+                # 単独会話アプリでは、連続読み上げを実機確認済みの経路を維持します。
+                self._engine.runAndWait()
+            else:
+                # 外部の戦闘開始信号を待たせないよう、同じスレッドでSAPIを少しずつ進めます。
+                self._engine.startLoop(False)
+                try:
+                    while self._engine.isBusy():
+                        if cancel_event.is_set():
+                            self._engine.stop()
+                            return False
+                        self._engine.iterate()
+                        time.sleep(0.01)
+                finally:
+                    self._engine.endLoop()
             self.output("音声読み上げ完了")
+            return True
         except Exception as exc:
             raise TTSError(f"音声の読み上げに失敗しました: {exc}") from exc

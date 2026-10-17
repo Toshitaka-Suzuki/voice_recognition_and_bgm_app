@@ -63,10 +63,12 @@ class TTSSettings:
 
 @dataclass(frozen=True)
 class QuestionSettings:
-    """作戦フェーズと感想フェーズで読み上げる質問文。"""
+    """作戦フェーズと、共通・勝敗別の感想フェーズで読み上げる質問文。"""
 
     strategy: str
     feedback: str
+    feedback_human_win: str
+    feedback_robot_win: str
 
 
 @dataclass(frozen=True)
@@ -213,6 +215,17 @@ def load_settings(path: Path) -> AppSettings:
         questions=QuestionSettings(
             strategy=_string(questions, "strategy", "questions"),
             feedback=_string(questions, "feedback", "questions"),
+            # 旧設定ファイルも単独会話アプリで使えるよう、未指定時は共通文へ戻します。
+            feedback_human_win=(
+                _string(questions, "feedback_human_win", "questions")
+                if "feedback_human_win" in questions
+                else _string(questions, "feedback", "questions")
+            ),
+            feedback_robot_win=(
+                _string(questions, "feedback_robot_win", "questions")
+                if "feedback_robot_win" in questions
+                else _string(questions, "feedback", "questions")
+            ),
         ),
     )
 

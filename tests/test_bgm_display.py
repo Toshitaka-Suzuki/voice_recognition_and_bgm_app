@@ -1,6 +1,8 @@
 """端末出力を捕捉し、日本語幅・イベント分離・状態抑制を検証する。"""
 import io
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import Mock
 
 from chambara_bgm.display import CLEAR_LINE, ConsoleDisplay, cell_width, fit_line
 from chambara_bgm.engine import Event
@@ -78,6 +80,41 @@ class DisplayTests(unittest.TestCase):
         self.assertNotIn("\r", text)
         self.assertNotIn("\x1b", text)
         self.assertEqual(text.count("パリイ失敗"), 1)
+
+    def test_concurrent_lines_are_complete_and_close_is_idempotent(self):
+        """会話と通信の別スレッド出力を混ぜず、端末設定を1回だけ戻す。"""
+
+        display, output = self.make_display(interactive=False)
+        restore_mode = Mock()
+        display.restore_mode = restore_mode
+
+        def write_group(group):  # noqa: ANN001
+            for index in range(25):
+                display.line(f"ログ{group}-{index}")
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            list(executor.map(write_group, range(4)))
+
+        lines = output.getvalue().splitlines()
+        self.assertEqual(len(lines), 100)
+        self.assertEqual(len(set(lines)), 100)
+        self.assertTrue(all(line.startswith("ログ") for line in lines))
+
+        display.close()
+        display.close()
+        restore_mode.assert_called_once()
+
+    def test_clear_status_removes_live_line_and_allows_new_stage(self):
+        """戦闘終了で状態行を消し、次ゲームでは同じ状態も再表示する。"""
+
+        display, output = self.make_display(interactive=False)
+        status = (1, 100.0, 0)
+        display.status("easy", status)
+        display.status("easy", status)
+        display.clear_status()
+        display.status("easy", status)
+
+        self.assertEqual(output.getvalue().count("簡単"), 2)
 
 
 if __name__ == "__main__":

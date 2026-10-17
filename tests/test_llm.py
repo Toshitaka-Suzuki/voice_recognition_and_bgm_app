@@ -4,7 +4,7 @@ import unittest
 
 from chambara_talk.config import LLMSettings
 from chambara_talk.llm import ChatBackend
-from chambara_talk.models import ConversationExample, ConversationPhase
+from chambara_talk.models import ConversationExample, ConversationPhase, FeedbackOutcome
 
 
 class ChatBackendTests(unittest.TestCase):
@@ -51,6 +51,19 @@ class ChatBackendTests(unittest.TestCase):
         clipped = self.backend._clip_to_limit(text)
         self.assertLessEqual(len(clipped), 80)
         self.assertTrue(clipped.endswith("。") or clipped.endswith("…"))
+
+    def test_feedback_prompt_reflects_human_loss_without_blame(self) -> None:
+        """ロボット勝利時の感想指示が、利用者を責めない内容になる。"""
+
+        messages = self.backend.build_messages(
+            ConversationPhase.FEEDBACK,
+            "悔しかった",
+            (),
+            outcome=FeedbackOutcome.ROBOT_WIN,
+        )
+
+        self.assertIn("robot_win", messages[0]["content"])
+        self.assertIn("責めず", messages[0]["content"])
 
 
 if __name__ == "__main__":

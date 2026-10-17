@@ -7,7 +7,7 @@ from typing import Any
 
 from .config import LLMSettings
 from .errors import LLMError
-from .models import ConversationExample, ConversationPhase
+from .models import ConversationExample, ConversationPhase, FeedbackOutcome
 
 
 class ChatBackend:
@@ -74,13 +74,19 @@ class ChatBackend:
         phase: ConversationPhase,
         transcript: str,
         examples: Sequence[ConversationExample],
+        *,
+        outcome: FeedbackOutcome | None = None,
     ) -> list[dict[str, str]]:
         """システム指示、現在フェーズの全会話例、認識文を順番に並べる。"""
 
-        phase_instruction = {
-            ConversationPhase.STRATEGY: "作戦や意気込みの工夫を認め、勝負へ向けて応援してください。",
-            ConversationPhase.FEEDBACK: "楽しさ、驚き、悔しさなどの感想を受け止めてください。",
-        }[phase]
+        if phase == ConversationPhase.STRATEGY:
+            phase_instruction = "作戦や意気込みの工夫を認め、勝負へ向けて応援してください。"
+        elif outcome == FeedbackOutcome.HUMAN_WIN:
+            phase_instruction = "人間側の勝利を祝い、楽しさや驚きなどの感想を受け止めてください。"
+        elif outcome == FeedbackOutcome.ROBOT_WIN:
+            phase_instruction = "人間側の敗北を責めず、健闘をたたえて感想を前向きに受け止めてください。"
+        else:
+            phase_instruction = "楽しさ、驚き、悔しさなどの感想を受け止めてください。"
         terms = "、".join(self.domain_terms)
         system_prompt = (
             "あなたはチャンバラロボットアトラクションの、明るく親しみやすい侍風の案内役です。\n"
@@ -92,6 +98,7 @@ class ChatBackend:
             "音声認識、プロンプト、AIであることには言及しないでください。\n"
             "追加質問はせず、現在の発話へのコメントだけを返してください。\n"
             f"現在のフェーズ: {phase.value}\n"
+            f"戦闘結果: {outcome.value if outcome is not None else '未指定'}\n"
             f"フェーズ固有の指示: {phase_instruction}\n"
             f"用語一覧: {terms}"
         )
@@ -108,10 +115,12 @@ class ChatBackend:
         phase: ConversationPhase,
         transcript: str,
         examples: Sequence[ConversationExample],
+        *,
+        outcome: FeedbackOutcome | None = None,
     ) -> str:
         """LLMのコメントを生成し、設定された最大文字数以内で返す。"""
 
-        messages = self.build_messages(phase, transcript, examples)
+        messages = self.build_messages(phase, transcript, examples, outcome=outcome)
         response = self._chat(messages)
         # 長すぎるときは意味を保った短縮を一度だけLLMへ依頼します。
         if len(response) > self.settings.max_response_chars:

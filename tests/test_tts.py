@@ -1,6 +1,7 @@
 """音声エンジンをモックへ差し替え、読み上げ制御を確認するテスト。"""
 
 import unittest
+from threading import Event
 from unittest.mock import Mock, patch
 
 from chambara_talk.config import TTSSettings
@@ -57,6 +58,23 @@ class SpeechSynthesizerTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TTSError, "SAPI failure"):
             synthesizer.speak("読み上げ")
+
+    @patch("chambara_talk.tts.time.sleep")
+    def test_cancelable_speech_stops_current_utterance(self, sleep: Mock) -> None:
+        """戦闘開始のキャンセルを同じSAPIループ内で検出して停止する。"""
+
+        cancel = Event()
+        engine = Mock()
+        engine.isBusy.side_effect = [True, True]
+        engine.iterate.side_effect = cancel.set
+        synthesizer = SpeechSynthesizer(settings(), output=lambda message: None)
+        synthesizer._engine = engine
+
+        self.assertFalse(synthesizer.speak("開始前質問", cancel_event=cancel))
+        engine.startLoop.assert_called_once_with(False)
+        engine.stop.assert_called_once()
+        engine.endLoop.assert_called_once()
+        sleep.assert_called_once()
 
 
 if __name__ == "__main__":

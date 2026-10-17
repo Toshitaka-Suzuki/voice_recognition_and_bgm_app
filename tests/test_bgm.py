@@ -64,6 +64,23 @@ class GameTests(unittest.TestCase):
             self.assertEqual(self.parry_at(ms).kind, kind)
         self.assertEqual(self.player.played, ["easy"])
 
+    def test_parry_returns_the_emitted_event(self):
+        """統合処理が通信結果へ変換できるよう、判定イベント自体を返す。"""
+
+        self.player.current = (1, 100)
+        event = self.game.submit_parry(timestamp=1)
+        self.assertIs(event, self.events[-1])
+        self.assertEqual(event.kind, "parry_success")
+
+    def test_absolute_stage_switch_is_idempotent(self):
+        """絶対段階で切り替え、同じ段階の再送では曲を再開しない。"""
+
+        with patch("chambara_bgm.engine.perf_counter", return_value=0):
+            self.assertTrue(self.game.switch_stage("normal"))
+            self.assertFalse(self.game.switch_stage("normal"))
+            self.assertTrue(self.game.switch_stage("hard"))
+        self.assertEqual(self.player.played, ["easy", "normal", "hard"])
+
     def test_end_exclusive_without_previous_success(self):
         self.assertEqual(self.parry_at(200).kind, "parry_failure")
         self.assertEqual(self.parry_at(199.999).kind, "parry_success")

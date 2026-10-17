@@ -1,0 +1,170 @@
+"""統合アプリの設定読込、部品作成、WebSocket起動を行う。"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import os
+import sys
+from pathlib import Path
+
+from chambara_bgm.config import load_tracks
+from chambara_bgm.display import ConsoleDisplay
+from chambara_bgm.engine import Game
+from chambara_bgm.player import AudioPlayer
+from chambara_talk.audio import AudioRecorder
+from chambara_talk.config import load_conversation_examples, load_settings
+from chambara_talk.controller import ConversationController
+from chambara_talk.errors import ChambaraTalkError
+from chambara_talk.llm import create_chat_backend
+from chambara_talk.speech import SpeechRecognizer
+from chambara_talk.tts import SpeechSynthesizer
+
+from .orchestrator import IntegratedController
+from .server import run_server
+
+
+def project_root() -> Path:
+    """インストール元のプロジェクトルートを返す。"""
+
+    return Path(__file__).resolve().parents[2]
+
+
+def port_number(value: str) -> int:
+    """コマンドラインのポート番号を検証する。"""
+
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("ポートは1〜65535の整数で指定してください。") from exc
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("ポートは1〜65535の整数で指定してください。")
+    return port
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """通信・会話・BGMのファイルを指定できる引数解析器を作る。"""
+
+    root = project_root()
+    parser = argparse.ArgumentParser(description="チャンバラ統合動作確認アプリ")
+    parser.add_argument("--host", default="127.0.0.1", help="WebSocket待ち受けIP")
+    parser.add_argument("--port", type=port_number, default=8765, help="WebSocket待ち受けポート")
+    parser.add_argument("--settings", type=Path, default=root / "config/settings.json")
+    parser.add_argument("--examples", type=Path, default=root / "data/conversation_examples.json")
+    parser.add_argument("--bgm-config", type=Path, default=root / "config/bgm_settings.json")
+    parser.add_argument("--audio-dir", type=Path, default=root / "data/bgm")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """全機能を初期化し、統合WebSocketサーバーを起動する。"""
+
+    if os.name != "nt":
+        print("統合アプリはWindows向けです。", file=sys.stderr)
+        return 1
+    args = build_parser().parse_args(argv)
+    chat_backend = None
+    game = None
+    controller = None
+    display = ConsoleDisplay()
+
+    def terminal_output(message: str) -> None:
+        """通常ログを表示し、戦闘中なら直後にBGM状態行を復元する。"""
+
+        display.line(str(message), restore_status=True)
+
+    try:
+        settings = load_settings(args.settings.resolve())
+        examples = load_conversation_examples(args.examples.resolve())
+        tracks = load_tracks(args.bgm_config.resolve(), args.audio_dir.resolve())
+
+        recorder = AudioRecorder(settings.audio)
+        recognizer = SpeechRecognizer(settings.speech_recognition, examples.domain_terms)
+        chat_backend = create_chat_backend(settings.llm, examples.domain_terms)
+        synthesizer = SpeechSynthesizer(settings.tts)
+
+        conversation = ConversationController(
+            recorder=recorder,
+            recognizer=recognizer,
+            chat_backend=chat_backend,
+            synthesizer=synthesizer,
+            examples=examples,
+            strategy_question=settings.questions.strategy,
+            feedback_question=settings.questions.feedback,
+            feedback_human_win_question=settings.questions.feedback_human_win,
+            feedback_robot_win_question=settings.questions.feedback_robot_win,
+            output=terminal_output,
+            manual_input_enabled=False,
+        )
+        game = Game(
+            tracks,
+            AudioPlayer(),
+            display.event,
+        )
+
+        def prepare() -> None:
+            """スレッド依存部品を、実際の会話と同じ専用スレッドで初期化する。"""
+
+            terminal_output("起動前チェックを実行しています...")
+            terminal_output(f"マイク: {recorder.check_device()}")
+            synthesizer.load()
+            terminal_output(f"音声: {synthesizer.voice_name}")
+            chat_backend.check_model()
+            terminal_output(f"LLM: {settings.llm.provider} / {settings.llm.model}")
+            recognizer.load()
+            terminal_output(f"音声認識: {settings.speech_recognition.model}")
+            terminal_output("起動前チェックが完了しました。")
+
+        controller = IntegratedController(
+            conversation,
+            game,
+            output=terminal_output,
+            prepare=prepare,
+            cleanup=chat_backend.close,
+            bgm_display=display,
+        )
+
+        async def run_application() -> None:
+            """起動確認に失敗した場合も、専用スレッドと部品を片付ける。"""
+
+            try:
+                await controller.prepare()
+                await run_server(
+                    controller,
+                    args.host,
+                    args.port,
+                    log_output=terminal_output,
+                )
+            finally:
+                await controller.close()
+
+        asyncio.run(run_application())
+        return 0
+    except ChambaraTalkError as exc:
+        print(f"起動エラー: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"通信起動エラー: 待ち受けIPとポートを確認してください: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\n終了します。")
+        return 130
+    except Exception as exc:
+        print(f"統合アプリを開始できませんでした: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        if game is not None:
+            try:
+                game.stop("shutdown")
+            except Exception:
+                pass
+        if chat_backend is not None and controller is None:
+            try:
+                chat_backend.close()
+            except ChambaraTalkError as exc:
+                print(f"LLM終了処理エラー: {exc}", file=sys.stderr)
+        display.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

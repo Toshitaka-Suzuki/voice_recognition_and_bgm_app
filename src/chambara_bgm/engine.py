@@ -59,24 +59,42 @@ class Game:
         return loop, ms, window
 
     def submit_parry(self, timestamp=None, generation=None):
+        """入力時刻を判定し、通知したイベントを返す。判定不能なら``None``。"""
+
         timestamp = perf_counter() if timestamp is None else timestamp
         if not self._accepts(timestamp, generation):
-            return
+            return None
         status = self.status(timestamp)
         if status is None:
-            return
+            return None
         loop, ms, window = status
         # 表示更新は成功済み状態を変更しない。遅着した旧周回信号も無視する。
         if self.last_loop is not None and loop < self.last_loop:
-            return
+            return None
         if loop != self.last_loop:
             self.successes.clear()
             self.last_loop = loop
         success = window is not None and window not in self.successes
         if success:
             self.successes.add(window)
-        self.emit(Event("parry_success" if success else "parry_failure", self.track.id,
-                        loop, ms, window, "" if success else "範囲外または成功済み"))
+        event = Event("parry_success" if success else "parry_failure", self.track.id,
+                      loop, ms, window, "" if success else "範囲外または成功済み")
+        self.emit(event)
+        return event
+
+    def switch_stage(self, stage: str) -> bool:
+        """実行中のBGMを指定段階へ切り替える。同じ段階なら何もしない。"""
+
+        if not self.running:
+            return False
+        target = next((index for index, track in enumerate(self.tracks) if track.id == stage), None)
+        if target is None:
+            raise ValueError(f"未定義のBGM段階です: {stage}")
+        if target == self.index:
+            return False
+        self.index = target
+        self._play()
+        return True
 
     def submit_life_decrement(self, timestamp=None, generation=None):
         timestamp = perf_counter() if timestamp is None else timestamp

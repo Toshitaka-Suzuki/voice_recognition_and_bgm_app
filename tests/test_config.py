@@ -53,7 +53,22 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(settings.audio.silence_seconds, 2.0)
         self.assertEqual(settings.llm.model, "qwen2.5:3b")
+        self.assertIn("勝利", settings.questions.feedback_human_win)
+        self.assertIn("惜しい", settings.questions.feedback_robot_win)
         self.assertEqual(len(examples.phases[ConversationPhase.STRATEGY]), 2)
+
+    def test_legacy_questions_fall_back_to_common_feedback(self) -> None:
+        """勝敗別質問がない旧設定でも、従来の共通質問を使って読み込める。"""
+
+        payload = json.loads((ROOT / "config/settings.json").read_text(encoding="utf-8"))
+        del payload["questions"]["feedback_human_win"]
+        del payload["questions"]["feedback_robot_win"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            questions = load_settings(path).questions
+        self.assertEqual(questions.feedback_human_win, questions.feedback)
+        self.assertEqual(questions.feedback_robot_win, questions.feedback)
 
     def test_unknown_phase_is_rejected(self) -> None:
         """仕様にないフェーズ名があるとエラーになることを確認する。"""

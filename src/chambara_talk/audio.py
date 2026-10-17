@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .config import AudioSettings
-from .errors import AudioError
+from .errors import AudioError, ConversationCancelled
 from .models import AudioData
 
 
@@ -82,11 +82,12 @@ class AudioRecorder:
         except Exception as exc:
             raise AudioError(f"利用可能な入力マイクを確認できません: {exc}") from exc
 
-    def record_until_silence(self) -> AudioData:
+    def record_until_silence(self, *, cancel_event=None) -> AudioData:
         """発話を録音し、無音または最大時間で終了した結果を返す。
 
         音声はファイルへ保存せずNumPy配列として返します。マイクからデータを
         取得できない場合や録音に失敗した場合は``AudioError``を発生させます。
+        統合アプリからキャンセルされた場合はストリームを閉じて直ちに戻ります。
         """
 
         try:
@@ -129,7 +130,11 @@ class AudioRecorder:
                 self.output("環境音を測定しています。静かにお待ちください...")
                 calibration_duration = 0.0
                 while calibration_duration < self.settings.calibration_seconds:
-                    chunk = chunks.get(timeout=2.0)
+                    self._check_cancel(cancel_event)
+                    try:
+                        chunk = chunks.get(timeout=0.1)
+                    except queue.Empty:
+                        continue
                     calibration_chunks.append(chunk)
                     calibration_duration += len(chunk) / self.settings.sample_rate
 
@@ -149,6 +154,7 @@ class AudioRecorder:
 
                 # 発話待機、発話開始、終了後の無音を同じループで監視します。
                 while True:
+                    self._check_cancel(cancel_event)
                     if (
                         not detector.speech_started
                         and time.monotonic() - wait_started_at
@@ -181,6 +187,9 @@ class AudioRecorder:
                     if recorded_seconds >= self.settings.max_recording_seconds:
                         stop_reason = "max_duration"
                         break
+        except ConversationCancelled:
+            # 通常の録音失敗へ変換せず、統合コントローラーへ中断をそのまま伝えます。
+            raise
         except queue.Empty as exc:
             raise AudioError("マイクから音声データを受信できませんでした。") from exc
         except Exception as exc:
@@ -205,6 +214,13 @@ class AudioRecorder:
             speech_detected=True,
             stop_reason=stop_reason,
         )
+
+    @staticmethod
+    def _check_cancel(cancel_event) -> None:  # noqa: ANN001
+        """外部キャンセルを録音ループ内で確認する。"""
+
+        if cancel_event is not None and cancel_event.is_set():
+            raise ConversationCancelled("録音を中断しました。")
 
     @staticmethod
     def _rms(chunk) -> float:  # noqa: ANN001

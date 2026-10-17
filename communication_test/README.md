@@ -37,14 +37,16 @@ communication_test/
 
 ## 3. 準備（初回のみ）
 
-Python 3.11または3.12と、ChromeまたはEdgeなどのブラウザーを用意してください。以下はWindowsの **Git Bash** 用です。PowerShellへそのまま貼り付けるコマンドではありません。
+Python 3.11または3.12と、ChromeまたはEdgeなどのブラウザーを用意してください。以下はWindowsのPowerShell用です。
 
-```bash
-cd /d/Program_Folder/Codex_ws/voice_recognition_app/communication_test
+```powershell
+Set-Location "D:\Program_Folder\Codex_ws\voice_recognition_app\communication_test"
 py -3.11 -m venv .venv
-source .venv/Scripts/activate
+.\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 ```
+
+`Activate.ps1`の実行がポリシーで拒否された場合は、そのPowerShellで`Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`を実行してから再度有効化します。
 
 `py -3.11` がPythonを検出できない場合は、`python --version` で3.11または3.12であることを確認し、仮想環境作成の行だけ `python -m venv .venv` に置き換えてください。3.12をランチャーから起動する場合は `py -3.12 -m venv .venv` も使えます。
 
@@ -54,13 +56,11 @@ python -m pip install -r requirements.txt
 
 ### ターミナルA：WebSocketサーバー
 
-以下のGit Bash手順は文字の送受信用です。数字キーで信号を送る場合は、[PowerShellでの起動手順](signals-guide.md#2-起動する) を使ってください。
+PowerShellで次を実行します。初回準備から続ける場合、移動と有効化は済んでいます。数字キーで信号を送る場合も、このPowerShellへフォーカスを置きます。
 
-Git Bashで次を実行します。初回準備から続ける場合、移動と有効化は済んでいます。
-
-```bash
-cd /d/Program_Folder/Codex_ws/voice_recognition_app/communication_test
-source .venv/Scripts/activate
+```powershell
+Set-Location "D:\Program_Folder\Codex_ws\voice_recognition_app\communication_test"
+.\.venv\Scripts\Activate.ps1
 python server.py
 ```
 
@@ -68,11 +68,11 @@ python server.py
 
 ### ターミナルB：画面の配信
 
-別のGit Bashで次を実行します。
+別のPowerShellで次を実行します。
 
-```bash
-cd /d/Program_Folder/Codex_ws/voice_recognition_app/communication_test
-source .venv/Scripts/activate
+```powershell
+Set-Location "D:\Program_Folder\Codex_ws\voice_recognition_app\communication_test"
+.\.venv\Scripts\Activate.ps1
 python -m http.server 8000 --bind 127.0.0.1 --directory .
 ```
 
@@ -108,9 +108,9 @@ PC Aは `server.py`、PC Bは `client.html` を使います。PC AのHTTPサー�
 
 両PCを同じルーター／スイッチの有線LANへ接続します。ケーブルで直接接続する場合も、両PCのIP設定が必要です。ケーブルをつなぐだけで必ず通信できるとは限りません。このサンプルはIP設定を自動変更しません。
 
-両PCでターミナルを開き、次を実行します（Git Bashでも実行できます）。
+両PCでPowerShellを開き、次を実行します。
 
-```bash
+```powershell
 ipconfig
 ```
 
@@ -126,11 +126,11 @@ ipconfig
 
 ### 手順2：PC Aでサーバーを起動する
 
-PC Aで「準備」の専用仮想環境と依存を用意し、Git Bashで次を実行します。`--host` には **PC A自身の有線LANのIPv4** を指定します。PC BのIPではありません。
+PC Aで「準備」の専用仮想環境と依存を用意し、PowerShellで次を実行します。`--host` には **PC A自身の有線LANのIPv4** を指定します。PC BのIPではありません。
 
-```bash
-cd /d/Program_Folder/Codex_ws/voice_recognition_app/communication_test
-source .venv/Scripts/activate
+```powershell
+Set-Location "D:\Program_Folder\Codex_ws\voice_recognition_app\communication_test"
+.\.venv\Scripts\Activate.ps1
 python server.py --host 192.168.10.10 --port 8765
 ```
 
@@ -138,10 +138,10 @@ python server.py --host 192.168.10.10 --port 8765
 
 ### 手順3：PC BにHTMLを配置し、画面を配信する
 
-PC Bの任意の作業フォルダ（例：`D:\websocket_client`）を用意し、このサンプルの `client.html` だけをコピーします。Python 3.11または3.12が使える状態で、Git Bashからそのフォルダへ移動します。
+PC Bの任意の作業フォルダ（例：`D:\websocket_client`）を用意し、このサンプルの `client.html` だけをコピーします。Python 3.11または3.12が使える状態で、PowerShellからそのフォルダへ移動します。
 
-```bash
-cd /d/websocket_client
+```powershell
+Set-Location "D:\websocket_client"
 python -m http.server 8000 --bind 127.0.0.1 --directory .
 ```
 
@@ -284,7 +284,7 @@ HTMLの変更後は画面を再読み込みして接続し直してください�
 
 `communication_test/` に移動し、専用の仮想環境を有効にして実行します。
 
-```bash
+```powershell
 python -m unittest discover -s tests -v
 ```
 

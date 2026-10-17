@@ -1,8 +1,11 @@
 """会話全体の進行を、外部機器を使わない偽物の部品で確認するテスト。"""
 
 import unittest
+from threading import Event
+from unittest.mock import Mock, patch
 
 from chambara_talk.controller import ConversationController, RecognitionConfirmation
+from chambara_talk.errors import AudioError, SpeechRecognitionError
 from chambara_talk.models import (
     AudioData,
     ConfirmationResult,
@@ -10,6 +13,8 @@ from chambara_talk.models import (
     ConversationExamples,
     ConversationPhase,
     ConversationState,
+    FeedbackOutcome,
+    PhaseRunResult,
     TranscriptionResult,
 )
 
@@ -22,9 +27,13 @@ class FakeRecorder:
 
         self.calls = 0
 
-    def record_until_silence(self) -> AudioData:
+    def record_until_silence(self, *, cancel_event=None) -> AudioData:
         """録音回数を増やし、テスト用の音声データを返す。"""
 
+        if cancel_event is not None and cancel_event.is_set():
+            from chambara_talk.errors import ConversationCancelled
+
+            raise ConversationCancelled("cancelled")
         self.calls += 1
         return AudioData(samples=[0.1], sample_rate=16000, speech_detected=True, stop_reason="silence")
 
@@ -52,10 +61,10 @@ class FakeChatBackend:
 
         self.calls = []
 
-    def generate(self, phase, transcript, examples) -> str:  # noqa: ANN001
+    def generate(self, phase, transcript, examples, *, outcome=None) -> str:  # noqa: ANN001
         """受け取った引数を保存し、固定の侍風コメントを返す。"""
 
-        self.calls.append((phase, transcript, tuple(examples)))
+        self.calls.append((phase, transcript, tuple(examples), outcome))
         return "よい心意気でござる！"
 
 
@@ -67,10 +76,13 @@ class FakeSynthesizer:
 
         self.spoken = []
 
-    def speak(self, text: str) -> None:
+    def speak(self, text: str, *, cancel_event=None) -> bool:
         """文章を読み上げる代わりにリストへ追加する。"""
 
+        if cancel_event is not None and cancel_event.is_set():
+            return False
         self.spoken.append(text)
+        return True
 
 
 def make_examples() -> ConversationExamples:
@@ -160,6 +172,41 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(any("12件" in line for line in outputs))
         self.assertTrue(any("9件" in line for line in outputs))
 
+    def test_feedback_phase_uses_outcome_question_and_context(self) -> None:
+        """人間勝利時は専用質問と勝敗情報をLLMへ渡す。"""
+
+        inputs = iter(["", ""])
+        chat = FakeChatBackend()
+        synthesizer = FakeSynthesizer()
+        controller = ConversationController(
+            recorder=FakeRecorder(), recognizer=FakeRecognizer(["楽しかった"]),
+            chat_backend=chat, synthesizer=synthesizer, examples=make_examples(),
+            strategy_question="作戦", feedback_question="共通感想",
+            feedback_human_win_question="勝利の感想", feedback_robot_win_question="敗北の感想",
+            input_function=lambda prompt: next(inputs), output=lambda text: None,
+        )
+
+        result = controller.run_phase(
+            ConversationPhase.FEEDBACK, outcome=FeedbackOutcome.HUMAN_WIN
+        )
+
+        self.assertEqual(result, PhaseRunResult.COMPLETED)
+        self.assertEqual(synthesizer.spoken[0], "勝利の感想")
+        self.assertEqual(chat.calls[0][3], FeedbackOutcome.HUMAN_WIN)
+
+    def test_cancelled_phase_never_calls_llm(self) -> None:
+        """開始前に外部キャンセル済みなら会話部品を動かさない。"""
+
+        controller, chat, synthesizer, _outputs = self.build_controller([], [])
+        cancel = Event()
+        cancel.set()
+
+        result = controller.run_phase(ConversationPhase.STRATEGY, cancel_event=cancel)
+
+        self.assertEqual(result, PhaseRunResult.CANCELLED)
+        self.assertEqual(chat.calls, [])
+        self.assertEqual(synthesizer.spoken, [])
+
     def test_confirmation_repeats_after_unknown_key(self) -> None:
         """Enterとq以外の入力では確認画面に留まることを確認する。"""
 
@@ -171,6 +218,155 @@ class ControllerTests(unittest.TestCase):
 
         self.assertEqual(result, ConfirmationResult.CONFIRMED)
         self.assertIn("Enterまたはqを入力してください。", outputs)
+
+    def test_automatic_mode_records_displays_and_sends_without_input(self) -> None:
+        """統合用自動モードはキー入力なしで認識文を表示してLLMへ渡す。"""
+
+        outputs = []
+        chat = FakeChatBackend()
+        synthesizer = FakeSynthesizer()
+
+        def unexpected_input(prompt: str) -> str:
+            self.fail(f"自動モードで入力待機が呼ばれました: {prompt}")
+
+        controller = ConversationController(
+            recorder=FakeRecorder(),
+            recognizer=FakeRecognizer(["自動送信する発話"]),
+            chat_backend=chat,
+            synthesizer=synthesizer,
+            examples=make_examples(),
+            strategy_question="作戦を教えてください",
+            feedback_question="感想を教えてください",
+            input_function=unexpected_input,
+            output=outputs.append,
+            manual_input_enabled=False,
+        )
+
+        result = controller.run_phase(ConversationPhase.STRATEGY, cancel_event=Event())
+
+        self.assertEqual(result, PhaseRunResult.COMPLETED)
+        self.assertEqual(chat.calls[0][1], "自動送信する発話")
+        self.assertIn("自動送信する発話", outputs)
+        self.assertIn("録音を自動で開始します。", outputs)
+        self.assertEqual(
+            synthesizer.spoken,
+            ["作戦を教えてください", "よい心意気でござる！"],
+        )
+
+    def test_automatic_mode_retries_recording_and_recognition_failures(self) -> None:
+        """自動モードは想定内エラーを表示し、1秒待機後の録音へ戻る。"""
+
+        speech = AudioData([0.1], 16000, True, "silence")
+        no_speech = AudioData([], 16000, False, "timeout")
+        recorder = Mock()
+        recorder.record_until_silence.side_effect = [
+            AudioError("device"),
+            no_speech,
+            speech,
+            speech,
+            speech,
+        ]
+        recognizer = Mock()
+        recognizer.transcribe.side_effect = [
+            SpeechRecognitionError("recognition"),
+            TranscriptionResult("", 0.1, "fake-whisper"),
+            TranscriptionResult("再試行後の発話", 0.1, "fake-whisper"),
+        ]
+        outputs = []
+        chat = FakeChatBackend()
+        controller = ConversationController(
+            recorder=recorder,
+            recognizer=recognizer,
+            chat_backend=chat,
+            synthesizer=FakeSynthesizer(),
+            examples=make_examples(),
+            strategy_question="作戦",
+            feedback_question="感想",
+            input_function=lambda prompt: self.fail(prompt),
+            output=outputs.append,
+            manual_input_enabled=False,
+        )
+
+        with patch("chambara_talk.controller.AUTO_RETRY_DELAY_SECONDS", 0):
+            result = controller.run_phase(
+                ConversationPhase.STRATEGY, cancel_event=Event()
+            )
+
+        self.assertEqual(result, PhaseRunResult.COMPLETED)
+        self.assertEqual(recorder.record_until_silence.call_count, 5)
+        self.assertEqual(recognizer.transcribe.call_count, 3)
+        self.assertEqual(chat.calls[0][1], "再試行後の発話")
+        self.assertTrue(any("録音エラー" in line for line in outputs))
+        self.assertTrue(any("発話を検出" in line for line in outputs))
+        self.assertTrue(any("音声認識エラー" in line for line in outputs))
+        self.assertTrue(any("認識結果が空" in line for line in outputs))
+        self.assertEqual(outputs.count("1秒後に録音を再開します。"), 4)
+
+    def test_automatic_retry_wait_is_cancelable(self) -> None:
+        """自動再試行の1秒待機中に外部キャンセルを受理する。"""
+
+        class CancelOnWaitEvent(Event):
+            """waitが呼ばれた時点でキャンセル済みにするテスト用Event。"""
+
+            def wait(self, timeout=None):  # noqa: ANN001
+                del timeout
+                self.set()
+                return True
+
+        recorder = Mock()
+        recorder.record_until_silence.side_effect = AudioError("device")
+        chat = FakeChatBackend()
+        controller = ConversationController(
+            recorder=recorder,
+            recognizer=FakeRecognizer([]),
+            chat_backend=chat,
+            synthesizer=FakeSynthesizer(),
+            examples=make_examples(),
+            strategy_question="作戦",
+            feedback_question="感想",
+            input_function=lambda prompt: self.fail(prompt),
+            output=lambda text: None,
+            manual_input_enabled=False,
+        )
+
+        result = controller.run_phase(
+            ConversationPhase.STRATEGY, cancel_event=CancelOnWaitEvent()
+        )
+
+        self.assertEqual(result, PhaseRunResult.CANCELLED)
+        self.assertEqual(chat.calls, [])
+
+    def test_automatic_mode_discards_transcript_cancelled_after_display(self) -> None:
+        """認識結果表示直後の割り込みでは、その発話をLLMへ送らない。"""
+
+        cancel = Event()
+        chat = FakeChatBackend()
+        synthesizer = FakeSynthesizer()
+
+        def output(text: str) -> None:
+            if text == "破棄する発話":
+                cancel.set()
+
+        controller = ConversationController(
+            recorder=FakeRecorder(),
+            recognizer=FakeRecognizer(["破棄する発話"]),
+            chat_backend=chat,
+            synthesizer=synthesizer,
+            examples=make_examples(),
+            strategy_question="作戦",
+            feedback_question="感想",
+            input_function=lambda prompt: self.fail(prompt),
+            output=output,
+            manual_input_enabled=False,
+        )
+
+        result = controller.run_phase(
+            ConversationPhase.STRATEGY, cancel_event=cancel
+        )
+
+        self.assertEqual(result, PhaseRunResult.CANCELLED)
+        self.assertEqual(chat.calls, [])
+        self.assertEqual(synthesizer.spoken, ["作戦"])
 
 
 if __name__ == "__main__":

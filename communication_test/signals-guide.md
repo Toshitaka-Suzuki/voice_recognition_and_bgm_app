@@ -22,16 +22,16 @@
 **Python側はWindows TerminalのPowerShell** を開き、以下を実行します。仮想環境のPythonを直接指定するので、PowerShellの有効化スクリプトは不要です。
 
 ```powershell
-cd D:\Program_Folder\Codex_ws\voice_recognition_app\communication_test
+Set-Location "D:\Program_Folder\Codex_ws\voice_recognition_app\communication_test"
 .\.venv\Scripts\python.exe server.py
 ```
 
-待ち受けとキー操作一覧が出ます。このターミナルを開いたままにしてください。キー操作には、このターミナルにフォーカスを置きます。Enterは押しません。Git BashのminttyやIDEの出力欄ではWindowsコンソール入力を使えない場合があるため、上記の起動方法を使います。
+待ち受けとキー操作一覧が出ます。このターミナルを開いたままにしてください。キー操作には、このターミナルにフォーカスを置きます。Enterは押しません。IDEの出力欄や標準入力をリダイレクトした環境ではWindowsコンソール入力を使えない場合があるため、上記の起動方法を使います。
 
 画面配信用にはもう1つのPowerShellを開きます。
 
 ```powershell
-cd D:\Program_Folder\Codex_ws\voice_recognition_app\communication_test
+Set-Location "D:\Program_Folder\Codex_ws\voice_recognition_app\communication_test"
 .\.venv\Scripts\python.exe -m http.server 8000 --bind 127.0.0.1 --directory .
 ```
 
@@ -44,7 +44,7 @@ PC AはPython、PC Bはブラウザーを動かします。IPアドレス確認�
 PC AのPowerShellで、**PC A自身の有線LANのIPv4** を指定します。
 
 ```powershell
-cd D:\Program_Folder\Codex_ws\voice_recognition_app\communication_test
+Set-Location "D:\Program_Folder\Codex_ws\voice_recognition_app\communication_test"
 .\.venv\Scripts\python.exe server.py --host 192.168.10.10 --port 8765
 ```
 
@@ -53,7 +53,7 @@ cd D:\Program_Folder\Codex_ws\voice_recognition_app\communication_test
 PC Bには `client.html` をコピーし、Python標準のHTTPサーバーで画面を配信します。`websockets` の導入は不要です。
 
 ```powershell
-cd D:\websocket_client
+Set-Location "D:\websocket_client"
 python -m http.server 8000 --bind 127.0.0.1 --directory .
 ```
 
@@ -155,7 +155,7 @@ Python：   送信 → ブラウザー (...) {"type":"received","name":"battle_e
 Python側は `Q` またはCtrl+C、HTTPサーバー側はCtrl+Cで終了します。
 
 ```powershell
-cd D:\Program_Folder\Codex_ws\voice_recognition_app\communication_test
+Set-Location "D:\Program_Folder\Codex_ws\voice_recognition_app\communication_test"
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 

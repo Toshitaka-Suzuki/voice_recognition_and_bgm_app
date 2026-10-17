@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>チャンバラ統合動作確認</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; color: #172033; background: #eef2f7; }
+    body { margin: 0; padding: 24px; }
+    main { max-width: 980px; margin: auto; }
+    section { background: white; margin: 16px 0; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px #20305018; }
+    h1 { margin-top: 0; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    input, select, button { font: inherit; padding: 10px 12px; border: 1px solid #8795aa; border-radius: 7px; }
+    input { flex: 1; min-width: 260px; }
+    button { background: #e8f0ff; cursor: pointer; }
+    button:disabled { cursor: default; opacity: .45; }
+    .danger { background: #fff0ef; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }
+    .card { padding: 12px; background: #f5f7fb; border-radius: 8px; }
+    .card span { display: block; color: #59677b; font-size: .85rem; }
+    .hint { line-height: 1.7; color: #4c5b70; }
+    code { background: #edf0f5; padding: 2px 5px; border-radius: 4px; }
+    #history { min-height: 220px; max-height: 440px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #101a2b; color: #edf4ff; padding: 16px; border-radius: 8px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>チャンバラ統合動作確認</h1>
+  <p class="hint">この画面を外部統合アプリの代わりに使い、会話・BGM・パリイ判定・通信の流れを確認します。</p>
+
+  <section>
+    <h2>1. 接続</h2>
+    <div class="row">
+      <input id="endpoint" value="ws://127.0.0.1:8765" aria-label="WebSocket接続先" spellcheck="false">
+      <button id="connect" type="button">接続</button>
+      <button id="disconnect" type="button" disabled>切断</button>
+    </div>
+    <p>接続状態：<strong id="connection">未接続</strong></p>
+  </section>
+
+  <section>
+    <h2>2. 受信した出力</h2>
+    <div class="cards">
+      <div class="card"><span>状態通知</span><strong id="last-status">未受信</strong></div>
+      <div class="card"><span>パリイ判定</span><strong id="last-parry">未受信</strong></div>
+      <div class="card"><span>受付通知</span><strong id="last-received">未受信</strong></div>
+      <div class="card"><span>最後のエラー</span><strong id="last-error">なし</strong></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>3. 入力信号</h2>
+    <p class="hint">通常は「ゲームスタート」→開始前インタビュー完了→「戦闘開始」の順です。開始前インタビュー中に戦闘開始を送ると割り込みも確認できます。</p>
+    <div class="row" id="signals">
+      <button type="button" data-signal="game_start" disabled>ゲームスタート</button>
+      <button type="button" data-signal="battle_start" disabled>戦闘開始</button>
+      <button type="button" data-signal="parry" disabled>パリイ</button>
+      <button class="danger" type="button" data-signal="battle_end" disabled>戦闘終了（ロボット勝利）</button>
+    </div>
+    <p class="hint">人間勝利は、戦闘中に残り回数を0へ減らして確認します。同じ値の再送や増加によるエラーも試せます。</p>
+    <form id="count-form" class="row">
+      <label for="count">弱点残り回数</label>
+      <select id="count">
+        <option value="3">3（開始時と同じ）</option>
+        <option value="2">2（normal）</option>
+        <option value="1">1（hard）</option>
+        <option value="0">0（人間勝利）</option>
+        <option value="4">4（不正値テスト）</option>
+      </select>
+      <button id="send-count" type="submit" disabled>送信</button>
+    </form>
+  </section>
+
+  <section>
+    <h2>4. 生JSON履歴</h2>
+    <p class="hint">送受信方向とJSONを直近300件まで表示します。受信内容はHTMLとして実行せず文字で表示します。</p>
+    <pre id="history" aria-label="WebSocket送受信履歴"></pre>
+  </section>
+</main>
+
+<script>
+  const endpoint = document.getElementById('endpoint');
+  const connectButton = document.getElementById('connect');
+  const disconnectButton = document.getElementById('disconnect');
+  const connectionLabel = document.getElementById('connection');
+  const lastStatus = document.getElementById('last-status');
+  const lastParry = document.getElementById('last-parry');
+  const lastReceived = document.getElementById('last-received');
+  const lastError = document.getElementById('last-error');
+  const history = document.getElementById('history');
+  const lines = [];
+  let socket = null;
+
+  const statusLabels = {
+    standby: 'スタンバイ',
+    pre_interview: '開始前インタビュー',
+    pre_interview_finished: '開始前インタビュー終了',
+    post_interview: '終了インタビュー',
+    post_interview_finished: '終了インタビュー終了',
+  };
+  const stateLabels = { ...statusLabels, waiting_battle_start: '戦闘開始待ち', battle: '戦闘中' };
+  const reasonLabels = {
+    not_ready: '再生時刻を確認中',
+    outside_window_or_already_successful: '判定範囲外または成功済み',
+  };
+
+  function log(direction, content) {
+    lines.push(`[${new Date().toLocaleTimeString('ja-JP')}] ${direction} ${content}`);
+    if (lines.length > 300) lines.shift();
+    history.textContent = lines.join('\n');
+    history.scrollTop = history.scrollHeight;
+  }
+
+  function updateControls() {
+    const open = socket?.readyState === WebSocket.OPEN;
+    connectButton.disabled = socket !== null;
+    disconnectButton.disabled = !open;
+    endpoint.disabled = socket !== null;
+    document.querySelectorAll('[data-signal]').forEach(button => { button.disabled = !open; });
+    document.getElementById('send-count').disabled = !open;
+  }
+
+  function send(message) {
+    if (socket?.readyState !== WebSocket.OPEN) return;
+    const text = JSON.stringify(message);
+    socket.send(text);
+    log(`送信 → 本アプリ (${socket.url})`, text);
+  }
+
+  function showMessage(message) {
+    if (message?.type === 'status' && Object.hasOwn(statusLabels, message.value)) {
+      lastStatus.textContent = statusLabels[message.value];
+    } else if (message?.type === 'parry_result' && ['success', 'failure'].includes(message.value)) {
+      const detail = message.reason ? `（${reasonLabels[message.reason] ?? message.reason}）` : '';
+      lastParry.textContent = `${message.value === 'success' ? '成功' : '失敗'}${detail}`;
+    } else if (message?.type === 'received' && typeof message.text === 'string') {
+      lastReceived.textContent = message.text;
+    } else if (message?.type === 'error' && typeof message.text === 'string') {
+      const state = stateLabels[message.state] ?? message.state ?? '不明';
+      lastError.textContent = `${message.text}（状態: ${state}）`;
+    } else if (message?.type === 'connected' && typeof message.text === 'string') {
+      log('接続通知', message.text);
+    } else {
+      log('形式エラー', '想定していないJSONです。');
+    }
+  }
+
+  connectButton.addEventListener('click', () => {
+    if (socket !== null) return;
+    let connection;
+    try {
+      const url = new URL(endpoint.value.trim());
+      if (!['ws:', 'wss:'].includes(url.protocol) || !url.hostname || url.hash || url.username || url.password) {
+        throw new Error('ws:// または wss:// の接続先を指定してください。');
+      }
+      connection = new WebSocket(url.href);
+    } catch (error) {
+      connectionLabel.textContent = '接続先エラー';
+      log('入力エラー', error.message);
+      return;
+    }
+    socket = connection;
+    connectionLabel.textContent = '接続中…';
+    lastStatus.textContent = lastParry.textContent = lastReceived.textContent = '未受信';
+    lastError.textContent = 'なし';
+    updateControls();
+
+    connection.addEventListener('open', () => {
+      if (socket !== connection) return;
+      connectionLabel.textContent = '接続済み';
+      log('接続', connection.url);
+      updateControls();
+    });
+    connection.addEventListener('message', event => {
+      if (socket !== connection) return;
+      log('受信 ← 本アプリ', event.data);
+      try { showMessage(JSON.parse(event.data)); }
+      catch { log('形式エラー', '受信内容をJSONとして読めません。'); }
+    });
+    connection.addEventListener('error', () => {
+      if (socket === connection) connectionLabel.textContent = '通信エラー';
+    });
+    connection.addEventListener('close', event => {
+      if (socket !== connection) return;
+      socket = null;
+      connectionLabel.textContent = '未接続';
+      log('切断', `コード ${event.code} ${event.reason}`);
+      updateControls();
+    });
+  });
+
+  disconnectButton.addEventListener('click', () => socket?.close(1000, '利用者が切断'));
+  document.querySelectorAll('[data-signal]').forEach(button => {
+    button.addEventListener('click', () => send({ type: 'signal', name: button.dataset.signal }));
+  });
+  document.getElementById('count-form').addEventListener('submit', event => {
+    event.preventDefault();
+    send({ type: 'signal', name: 'weak_point_count', count: Number(document.getElementById('count').value) });
+  });
+  window.addEventListener('pagehide', () => socket?.close());
+  updateControls();
+</script>
+</body>
+</html>

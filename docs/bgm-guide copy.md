@@ -2,8 +2,7 @@
 
 既存の会話アプリと同じPython環境を使いますが、音声認識・LLM・音声合成は起動しません。
 追加の依存パッケージはありません。Windowsの対話可能なコンソールで実行します。
-PowerShell、コマンドプロンプト、またはWindows Terminalを使用してください。
-Git Bashのminttyや入力をリダイレクトした環境では、Windowsコンソールのキーイベントを取得できない場合があります。
+PowerShellまたはWindows TerminalのPowerShellを使用してください。IDEの出力欄や入力をリダイレクトした環境では、Windowsコンソールのキーイベントを取得できない場合があります。
 
 ## 起動
 
@@ -11,22 +10,23 @@ Git Bashのminttyや入力をリダイレクトした環境では、Windowsコ�
 2. `config/bgm_settings.json`の区間を楽曲のリズムに合わせて編集します。
 3. 既存の仮想環境を有効化し、プロジェクトフォルダで起動します。
 
-```bash
+```powershell
 python -m chambara_bgm
 ```
 
 既存環境に新しいパッケージがまだ認識されない場合は、インストールせず次でも起動できます。
 
-```bash
-PYTHONPATH=src python -m chambara_bgm
+```powershell
+$env:PYTHONPATH = "src"
+python -m chambara_bgm
 ```
 
-PowerShellでの同等の指定は`$env:PYTHONPATH = "src"`です。
+`PYTHONPATH`の指定は現在のPowerShellセッションにだけ残ります。通常は`pip install -e .`を行い、この指定なしで起動してください。
 既存のセットアップ手順で`pip install -e .`を行った環境では、`chambara-bgm`でも起動できます。
 設定と音声フォルダを変更する場合は次を使います。
 
-```bash
-python -m chambara_bgm --config config/bgm_settings.json --audio-dir data/bgm
+```powershell
+python -m chambara_bgm --config .\config\bgm_settings.json --audio-dir .\data\bgm
 ```
 
 起動後、Enterで設定と全曲を読み込み、簡単から開始します。Spaceはパリイ、Lはライフ減少、Qは終了です。
@@ -86,7 +86,7 @@ game.stop()
 
 ## 検証と制約
 
-```bash
+```powershell
 python -m unittest discover -s tests -v
 ```
 

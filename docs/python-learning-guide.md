@@ -2,34 +2,34 @@
 
 このガイドでは、チャンバラロボット会話アプリで実際に使われているPythonの機能を基礎から説明します。アプリ全体の設計は[プログラム構成解説書](program-guide.md)を参照してください。
 
-## 1. Git Bashで使うコマンド
+## 1. PowerShellで使うコマンド
 
 コマンドはプロジェクトフォルダで実行します。
 
-```bash
-cd /d/Program_Folder/Codex_ws/voice_recognition_app
+```powershell
+Set-Location "D:\Program_Folder\Codex_ws\voice_recognition_app"
 ```
 
 ### 仮想環境
 
 仮想環境は、このアプリ専用のPythonライブラリ置き場です。他のPythonアプリとライブラリの版が衝突するのを防ぎます。
 
-```bash
+```powershell
 # Python 3.11で.venvを作る（最初の1回だけ）
 py -3.11 -m venv .venv
 
-# Git Bashで仮想環境を有効にする
-source .venv/Scripts/activate
+# PowerShellで仮想環境を有効にする
+.\.venv\Scripts\Activate.ps1
 
 # 仮想環境を終了する
 deactivate
 ```
 
-PowerShell用の`Activate.ps1`をGit Bashで直接実行することはできません。Git Bashでは`source .venv/Scripts/activate`を使います。
+`Activate.ps1`の実行がポリシーで拒否された場合は、`Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`を実行してから再度有効化します。`-Scope Process`の設定は現在のPowerShellを閉じると失われるため、システム全体の設定は変更しません。
 
 ### インストールと実行
 
-```bash
+```powershell
 # pip自身を更新する
 python -m pip install --upgrade pip
 
@@ -185,7 +185,7 @@ from .errors import AudioError
 
 `__main__.py`があるため、次の形式でパッケージを起動できます。
 
-```bash
+```powershell
 python -m chambara_talk
 ```
 
@@ -348,6 +348,8 @@ controller = ConversationController(
 
 テストでは`FakeRecorder`などの小さな偽物へ差し替え、マイクやGPUなしで会話の順序を確認します。
 
+`manual_input_enabled`は、同じControllerを2種類の起動方法で使うための真偽値です。省略時の`True`では単独版のEnter・`q`操作を残し、統合版が指定する`False`では質問後の録音と認識後の送信を自動で進めます。
+
 `unittest.mock.Mock`は、呼ばれた回数や引数を記録できる汎用の偽物です。`patch`はテスト中だけ関数の戻り値などを置き換えます。
 
 ## 18. 主な標準ライブラリ
@@ -391,7 +393,7 @@ OSの音声合成機能をPythonから利用します。WindowsではSAPI5を通
 
 次のコマンドで`tests`内のテストを自動検出します。
 
-```bash
+```powershell
 python -m unittest discover -s tests -v
 ```
 
@@ -409,12 +411,12 @@ python -m unittest discover -s tests -v
 
 公式の`github-copilot-sdk`はPythonからCopilotを使うための追加ライブラリです。必要なPCだけで導入できます。
 
-```bash
-source .venv/Scripts/activate
+```powershell
+.\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[copilot]"
 python -m copilot download-runtime
 copilot login
-python -m chambara_talk --settings config/settings.copilot.json
+python -m chambara_talk --settings .\config\settings.copilot.json
 ```
 
 `.[copilot]`の角括弧は、`pyproject.toml`に定義された追加依存グループを指定しています。通常の`pip install -e .`ではCopilot SDKは入りません。
@@ -444,4 +446,4 @@ Runnerは専用のイベントループを保持します。同じループでSD
 
 CopilotのセッションIDには標準ライブラリ`uuid`を使い、作業フォルダには`tempfile.TemporaryDirectory`を使います。UUIDは会話ごとに別のIDを作るので、作戦・感想や再録音の履歴を混ぜずに扱えます。
 
-クラウドへ送る文章は、`json.dumps(messages, ensure_ascii=False)`で日本語を含むJSON文字列へ変換します。送信するのはEnterで確定した認識文と会話例・用語・指示です。録音音声は送信しませんが、SDK側やGitHub側の保持は完全には保証できません。データの扱いはREADMEのCopilot説明を確認してください。
+クラウドへ送る文章は、`json.dumps(messages, ensure_ascii=False)`で日本語を含むJSON文字列へ変換します。送信するのは認識文と会話例・用語・指示です。単独版ではEnter確定後、統合版では認識結果の表示後に自動送信します。録音音声は送信しませんが、SDK側やGitHub側の保持は完全には保証できません。データの扱いはREADMEのCopilot説明を確認してください。

@@ -3,6 +3,7 @@ import os
 import shutil
 import sys
 import unicodedata
+from threading import RLock
 
 LABELS = {"easy": "簡単", "normal": "普通", "hard": "難しい"}
 CLEAR_LINE = "\r\x1b[2K"
@@ -35,6 +36,8 @@ class ConsoleDisplay:
         self.last_key = None
         self.last_status = None
         self.visible = False
+        self._lock = RLock()
+        self._closed = False
 
     def _enable_windows_vt(self):
         """WindowsコンソールではANSI行消去を有効化し、終了時に元へ戻す。"""
@@ -74,49 +77,73 @@ class ConsoleDisplay:
             self.visible = True
 
     def status(self, stage, status, waiting=False, synchronizing=False):
-        if status is None:
-            message = ("音声出力開始待ち" if waiting else
-                       "音声同期確認中" if synchronizing else "再生時刻確認中")
-            key = (stage, message)
-        else:
-            loop, ms, window = status
-            state = "有効" if window is not None else "無効"
-            message = f"{LABELS[stage]} | {ms:.1f} ms | 判定:{state} | 周回{loop}"
-            key = (stage, loop, window is not None)
-        self.last_status = message
-        if self.interactive:
-            self._render()
-        elif key != self.last_key:
-            self._write(message + "\n")
-        self.last_key = key
+        with self._lock:
+            if self._closed:
+                return
+            if status is None:
+                message = ("音声出力開始待ち" if waiting else
+                           "音声同期確認中" if synchronizing else "再生時刻確認中")
+                key = (stage, message)
+            else:
+                loop, ms, window = status
+                state = "有効" if window is not None else "無効"
+                message = f"{LABELS[stage]} | {ms:.1f} ms | 判定:{state} | 周回{loop}"
+                key = (stage, loop, window is not None)
+            self.last_status = message
+            if self.interactive:
+                self._render()
+            elif key != self.last_key:
+                self._write(message + "\n")
+            self.last_key = key
 
     def line(self, message, restore_status=False):
-        self._clear()
-        # ログは省略せず、表示幅に合わせて改行する。
-        limit = self._limit() if self.interactive else None
-        for line in message.split("\n"):
-            part = ""
-            for char in line:
-                if limit and part and cell_width(part + char) > limit:
-                    self._write(part + "\n")
-                    part = ""
-                part += char
-            self._write(part + "\n")
-        if self.interactive and restore_status:
-            self._render()
+        with self._lock:
+            if self._closed:
+                return
+            self._clear()
+            # ログは省略せず、表示幅に合わせて改行する。
+            limit = self._limit() if self.interactive else None
+            for line in message.split("\n"):
+                part = ""
+                for char in line:
+                    if limit and part and cell_width(part + char) > limit:
+                        self._write(part + "\n")
+                        part = ""
+                    part += char
+                self._write(part + "\n")
+            if self.interactive and restore_status:
+                self._render()
 
     def event(self, event):
-        labels = {"stage_changed": "曲切り替え", "parry_success": "パリイ成功",
-                  "parry_failure": "パリイ失敗", "life_decrement": "ライフ減少信号受付",
-                  "game_finished": "ゲーム終了"}
-        if event.kind in ("stage_changed", "game_finished"):
+        with self._lock:
+            if self._closed:
+                return
+            labels = {"stage_changed": "曲切り替え", "parry_success": "パリイ成功",
+                      "parry_failure": "パリイ失敗", "life_decrement": "ライフ減少信号受付",
+                      "game_finished": "ゲーム終了"}
+            if event.kind in ("stage_changed", "game_finished"):
+                self.last_status = None
+                self.last_key = None
+            position = "" if event.position_ms is None else f" {event.position_ms:.1f} ms / 周回{event.loop}"
+            self.line(f"{labels[event.kind]}: {LABELS[event.stage]}{position} {event.reason}".rstrip(),
+                      restore_status=True)
+
+    def clear_status(self):
+        """戦闘終了時に状態行と重複抑制用の記録を消去する。"""
+
+        with self._lock:
+            if self._closed:
+                return
             self.last_status = None
-        position = "" if event.position_ms is None else f" {event.position_ms:.1f} ms / 周回{event.loop}"
-        self.line(f"{labels[event.kind]}: {LABELS[event.stage]}{position} {event.reason}".rstrip(),
-                  restore_status=True)
+            self.last_key = None
+            self._clear()
 
     def close(self):
-        try:
-            self._clear()
-        finally:
-            self.restore_mode()
+        with self._lock:
+            if self._closed:
+                return
+            try:
+                self.clear_status()
+            finally:
+                self.restore_mode()
+                self._closed = True

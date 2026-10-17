@@ -14,6 +14,13 @@ class ConversationPhase(str, Enum):
     FEEDBACK = "feedback"
 
 
+class FeedbackOutcome(str, Enum):
+    """終了インタビューへ渡す戦闘結果を表す。"""
+
+    HUMAN_WIN = "human_win"
+    ROBOT_WIN = "robot_win"
+
+
 class ConversationState(Enum):
     """アプリの進行状態を表す。
 
@@ -29,10 +36,19 @@ class ConversationState(Enum):
 
 
 class ConfirmationResult(Enum):
-    """Enterで確定したか、qで終了したかを表す。"""
+    """Enterで確定したか、qまたは外部信号で終了したかを表す。"""
 
     CONFIRMED = auto()
     QUIT = auto()
+    CANCELLED = auto()
+
+
+class PhaseRunResult(str, Enum):
+    """会話1フェーズの終了理由。統合処理が次の状態を決めるために使う。"""
+
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    QUIT = "quit"
 
 
 @dataclass(frozen=True)

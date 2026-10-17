@@ -33,3 +33,9 @@ class TTSError(ChambaraTalkError):
     """pyttsx3の初期化または音声読み上げに失敗したときのエラー。"""
 
     pass
+
+
+class ConversationCancelled(ChambaraTalkError):
+    """外部信号によって進行中の会話処理が中断されたときの通知。"""
+
+    pass

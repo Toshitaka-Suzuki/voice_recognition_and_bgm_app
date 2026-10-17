@@ -17,8 +17,9 @@
 
 Python初心者向けに、アプリの構成とコードで使われているPython機能を別々の資料へまとめています。
 
-- [Python学習ガイド](docs/python-learning-guide.md)：Pythonの基礎、Git Bashのコマンド、標準機能、外部ライブラリを説明します。
+- [Python学習ガイド](docs/python-learning-guide.md)：Pythonの基礎、PowerShellのコマンド、標準機能、外部ライブラリを説明します。
 - [プログラム構成解説書](docs/program-guide.md)：各ファイルの役割、処理の流れ、設定、エラー処理、テスト構成を説明します。
+- [統合動作確認ガイド](docs/integration-guide.md)：会話、BGM、パリイ判定、WebSocket通信を一連で動かす方法とJSON仕様を説明します。
 
 次の順番で読むと理解しやすくなります。
 
@@ -35,6 +36,8 @@ BGM再生とパリイ判定だけを試す独立アプリもあります。
 `python -m chambara_bgm`で起動し、Spaceでパリイ、Lでライフ減少信号を模擬できます。
 パリイ成功では曲を変えず、ライフ減少信号で難易度を進めます。
 
+全機能をまとめて外部統合アプリまたはブラウザー模擬画面から操作する場合は、`python -m chambara_app`または`chambara-app`を起動します。統合版では質問の読み上げ後に録音を自動開始し、認識結果を表示してからEnter確認なしでLLMへ送ります。戦闘中はBGMの種類、再生時間、判定状態、周回とパリイ結果をターミナルへ表示します。終了操作はCtrl+Cです。詳しい順序と模擬画面の起動方法は[統合動作確認ガイド](docs/integration-guide.md)を参照してください。
+
 - Windows 10または11（64bit）
 - Python 3.11（64bit）
 - 入力マイク
@@ -45,28 +48,28 @@ BGM再生とパリイ判定だけを試す独立アプリもあります。
 
 ## セットアップ
 
-Git Bashを開き、プロジェクトフォルダへ移動して次を実行します。Windowsの `D:\Program_Folder\Codex_ws\voice_recognition_app` は、Git Bashでは `/d/Program_Folder/Codex_ws/voice_recognition_app` と表記します。
+PowerShellを開き、プロジェクトフォルダへ移動して次を実行します。
 
-```bash
-cd /d/Program_Folder/Codex_ws/voice_recognition_app
+```powershell
+Set-Location "D:\Program_Folder\Codex_ws\voice_recognition_app"
 py -3.11 -m venv .venv
-source .venv/Scripts/activate
+.\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -e .
 ollama pull qwen2.5:3b
 ```
 
-仮想環境が有効になると、Git Bashのプロンプト先頭に `(.venv)` と表示されます。
+仮想環境が有効になると、PowerShellのプロンプト先頭に `(.venv)` と表示されます。`Activate.ps1`の実行がポリシーで拒否された場合は、そのPowerShellで`Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`を実行してから、もう一度有効化してください。この設定は現在のPowerShellプロセスだけに適用されます。
 
 別のターミナルでOllamaが起動していることを確認してから、アプリを実行します。
 
-```bash
+```powershell
 python -m chambara_talk
 ```
 
 インストール時に作られるコマンドでも起動できます。
 
-```bash
+```powershell
 chambara-talk
 ```
 
@@ -76,19 +79,19 @@ chambara-talk
 
 公式Python SDKを使い、LLM生成をCopilot側で実行します。VS Codeの拡張機能への入力操作は不要です。Ollamaの起動・モデル取得も不要です。
 
-Git Bashで、アプリ用仮想環境を有効にして追加依存をインストールします。
+PowerShellで、アプリ用仮想環境を有効にして追加依存をインストールします。
 
-```bash
-source .venv/Scripts/activate
+```powershell
+.\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[copilot]"
 python -m copilot download-runtime
 copilot login
-python -m chambara_talk --settings config/settings.copilot.json
+python -m chambara_talk --settings .\config\settings.copilot.json
 ```
 
 `copilot login`は導入済みCopilot CLIで行います。ログイン済みの場合は再ログイン不要です。SDKは互換性のあるランタイムを管理します。CLIと同じWindowsユーザーで起動してください。SDK 1.0.19へ固定しています。
 
-サンドボックス検証環境を使用する場合は、上記の有効化行を`source .sandbox-venv/Scripts/activate`へ変更してください。
+サンドボックス検証環境を使用する場合は、上記の有効化行を`.\.sandbox-venv\Scripts\Activate.ps1`へ変更してください。
 
 `settings.copilot.json`は音声認識を`small`・`cpu`・`int8`にしているためCUDAは不要です。録音と読み上げはこれまでどおりPC上で実行します。CPUでは認識に時間がかかる場合があります。
 
@@ -100,7 +103,7 @@ python -m chambara_talk --settings config/settings.copilot.json
 
 Copilotが失敗した場合は日本語エラーを表示し、録音待機へ戻ります。自動でOllamaへ切り替えることはありません。従来のローカル方式へ戻す場合は、`--settings`を省略して起動します。
 
-クラウドへ送信するのは、Enterで確定した認識文、現在フェーズの会話例全件、用語一覧、システム指示です。録音音声は送信しません。通常は各フェーズ1回ずつ生成し、80文字超の応答では短縮のため1回追加生成します。これらはCopilotの利用枠を消費します。
+クラウドへ送信するのは、認識文、現在フェーズの会話例全件、用語一覧、システム指示です。単独版ではEnterで確定した認識文、統合版では画面表示後に自動確定した認識文を送ります。録音音声は送信しません。通常は各フェーズ1回ずつ生成し、80文字超の応答では短縮のため1回追加生成します。これらはCopilotの利用枠を消費します。
 
 SDKの履歴検索・メモリ・ツール・設定探索を無効化し、各生成後にアプリが作ったセッションをSDKから削除します。既存のCopilot会話やログイン情報は削除しません。空の一時作業フォルダは終了時に削除します。SDK/CLIが生成するログや異常終了時のデータ残存、GitHub側の保持は完全には保証できません。クラウド方式はこの前提を許容するデバッグ用です。
 
@@ -110,15 +113,15 @@ SDKの履歴検索・メモリ・ツール・設定探索を無効化し、各�
 
 Windows版pyttsx3 2.99には、最初の読み上げ以降が無音になる不具合があります。このアプリでは動作確認済みの2.98へ固定しています。既存環境を更新した場合は、仮想環境を有効にして次を実行してください。
 
-```bash
+```powershell
 python -m pip install --force-reinstall "pyttsx3==2.98"
 ```
 
 サンドボックス検証環境も使用する場合は、環境を切り替えて同じ更新を行います。
 
-```bash
+```powershell
 deactivate
-source .sandbox-venv/Scripts/activate
+.\.sandbox-venv\Scripts\Activate.ps1
 python -m pip install --force-reinstall "pyttsx3==2.98"
 ```
 
@@ -138,7 +141,7 @@ python -m pip install --force-reinstall "pyttsx3==2.98"
 
 高性能PCでgpt-oss-20bを使用する場合は、次を実行します。
 
-```bash
+```powershell
 ollama pull gpt-oss:20b
 ```
 
@@ -161,7 +164,7 @@ ollama pull gpt-oss:20b
 
 依存関係のインストール後、次を実行します。
 
-```bash
+```powershell
 python -m unittest discover -s tests -v
 ```
 
