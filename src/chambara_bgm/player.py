@@ -30,6 +30,14 @@ class AudioPlayer:
         self._last_warning_at = None
         self._reported_underflows = 0
         self.last_block_frames = 0
+        self.guide_start_frame = None
+
+    def set_guide_start(self, absolute_ms):
+        """Noneで予告音を止め、それ以外は指定された完全な4拍から開始する。"""
+        with self.lock:
+            self.guide_start_frame = (
+                None if absolute_ms is None else round(absolute_ms * self.track.sample_rate / 1000)
+            )
 
     @property
     def synchronizing(self):
@@ -58,6 +66,7 @@ class AudioPlayer:
         self.stop()
         self.track = track
         self.frames_sent = 0
+        self.guide_start_frame = None
         self.started_at = None
         self.device_name = self.device_id = self.host_api = "不明"
         self.output_latency = None
@@ -119,10 +128,20 @@ class AudioPlayer:
                 else:
                     self.anchors.append((audible_at, self.frames_sent, frames))
             offset = 0
+            with self.lock:
+                guide_start = self.guide_start_frame
             while offset < frames:
                 source = self.frames_sent % len(self.track.samples)
                 count = min(frames - offset, len(self.track.samples) - source)
                 outdata[offset:offset + count] = self.track.samples[source:source + count]
+                guide_samples = getattr(self.track, "guide_samples", None)
+                if guide_samples is not None:
+                    outdata[offset:offset + count] *= 0.65
+                    if guide_start is not None:
+                        skip = min(count, max(0, guide_start - self.frames_sent))
+                        outdata[offset + skip:offset + count] += (
+                            guide_samples[source + skip:source + count, None]
+                        )
                 offset += count
                 self.frames_sent += count
         except Exception as exc:

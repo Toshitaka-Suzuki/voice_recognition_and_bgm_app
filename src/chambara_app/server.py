@@ -53,19 +53,21 @@ async def run_server(
         async def send(message: dict[str, object]) -> None:
             text = json.dumps(message, ensure_ascii=False)
             await connection.send(text)
-            log(f"送信 → 外部アプリ {connection.remote_address}", text, log_output)
+            if message.get("type") != "rhythm_state":
+                log(f"送信 → 外部アプリ {connection.remote_address}", text, log_output)
 
         try:
             log("接続", str(connection.remote_address), log_output)
             await controller.connect(send)
             async for raw in connection:
                 received_at = perf_counter()
-                log(f"受信 ← 外部アプリ {connection.remote_address}", str(raw), log_output)
                 try:
                     signal = parse_signal(raw)
                 except ProtocolError as exc:
                     await send(error_message(str(exc), controller.state.value))
                     continue
+                if signal.name != "rhythm_sync":
+                    log(f"受信 ← 外部アプリ {connection.remote_address}", str(raw), log_output)
                 await controller.handle(signal, received_at)
         except ConnectionClosed:
             pass

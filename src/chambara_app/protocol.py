@@ -12,6 +12,11 @@ SIGNAL_LABELS = {
     "parry": "パリイ",
     "weak_point_count": "弱点残り回数",
     "battle_end": "戦闘終了",
+    "game_cancel": "ゲーム中断",
+    "heartbeat": "接続確認",
+    "rhythm_sync": "音楽位置確認",
+    "defense_ready": "受けの準備完了",
+    "defense_pause": "受けの予告停止",
 }
 
 
@@ -25,6 +30,7 @@ class Signal:
 
     name: str
     count: int | None = None
+    request_id: str | None = None
 
 
 def parse_signal(raw: str | bytes) -> Signal:
@@ -41,12 +47,17 @@ def parse_signal(raw: str | bytes) -> Signal:
     name = message.get("name")
     if message.get("type") != "signal" or not isinstance(name, str) or name not in SIGNAL_LABELS:
         raise ProtocolError("メッセージ形式または信号名が正しくありません。")
+    request_id = message.get("request_id")
+    if request_id is not None and (
+        not isinstance(request_id, str) or not 1 <= len(request_id) <= 64
+    ):
+        raise ProtocolError("request_idは1〜64文字の文字列で指定してください。")
     if name != "weak_point_count":
-        return Signal(name)
+        return Signal(name, request_id=request_id)
     count = message.get("count")
     if type(count) is not int or not 0 <= count <= MAX_SAFE_INTEGER:
         raise ProtocolError(f"残り回数は0〜{MAX_SAFE_INTEGER}の整数で指定してください。")
-    return Signal(name, count)
+    return Signal(name, count, request_id)
 
 
 def received(signal: Signal) -> dict[str, object]:
@@ -58,11 +69,13 @@ def received(signal: Signal) -> dict[str, object]:
             "name": signal.name,
             "text": f"弱点残り回数 {signal.count} を受信しました。",
             "count": signal.count,
+            **({"request_id": signal.request_id} if signal.request_id is not None else {}),
         }
     return {
         "type": "received",
         "name": signal.name,
         "text": f"{SIGNAL_LABELS[signal.name]}を受信しました。",
+        **({"request_id": signal.request_id} if signal.request_id is not None else {}),
     }
 
 

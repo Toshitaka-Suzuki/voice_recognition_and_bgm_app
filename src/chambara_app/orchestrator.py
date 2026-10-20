@@ -45,6 +45,7 @@ class IntegratedController:
         prepare: Callable[[], None] | None = None,
         cleanup: Callable[[], None] | None = None,
         bgm_display: Any | None = None,
+        conversation_mode: str = "live",
     ) -> None:
         """会話・BGM部品と、任意のBGMデバッグ表示を受け取る。"""
 
@@ -54,6 +55,7 @@ class IntegratedController:
         self._prepare = prepare
         self._cleanup = cleanup
         self.bgm_display = bgm_display
+        self.conversation_mode = conversation_mode
         # SAPI5とCopilotのイベントループは、作成から終了まで同じ1スレッドで扱います。
         self._conversation_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="chambara-conversation"
@@ -84,7 +86,11 @@ class IntegratedController:
         async with self._state_lock:
             await self._reset_locked(send_status=False)
             self._send = send
-            await self._send_message({"type": "connected", "text": "接続しました"})
+            await self._send_message({
+                "type": "connected", "text": "接続しました",
+                "protocol_version": 2, "conversation_mode": self.conversation_mode,
+                **({"rhythm_guide": True} if getattr(self.game.track, "guide", None) is not None else {}),
+            })
             await self._send_status("standby")
             if self._health_task is None or self._health_task.done():
                 self._health_task = asyncio.create_task(self._health_loop())
@@ -135,6 +141,22 @@ class IntegratedController:
                 await self._handle_weak_point(signal)
             elif signal.name == "battle_end":
                 await self._handle_battle_end(signal)
+            elif signal.name == "game_cancel":
+                await self._send_message(received(signal))
+                await self._reset_locked(send_status=True)
+            elif signal.name == "heartbeat":
+                await self._send_message(received(signal))
+            elif signal.name == "rhythm_sync":
+                state = self.game.rhythm_state(perf_counter()) if self.state == AppState.BATTLE else {
+                    "ready": False, "active": False,
+                }
+                await self._send_message({
+                    "type": "rhythm_state", "request_id": signal.request_id, **state,
+                })
+            elif signal.name in ("defense_ready", "defense_pause"):
+                if self.state == AppState.BATTLE:
+                    self.game.set_defense(signal.name == "defense_ready", timestamp)
+                await self._send_message(received(signal))
 
     async def _handle_game_start(self, signal: Signal) -> None:
         if self.state != AppState.STANDBY:
@@ -161,6 +183,7 @@ class IntegratedController:
         self.outcome = None
         self.state = AppState.BATTLE
         self.output("戦闘開始: easy BGMを再生します。")
+        await self._send_status("battle_started")
 
     async def _handle_parry(self, signal: Signal, timestamp: float) -> None:
         if self.state != AppState.BATTLE:
@@ -190,6 +213,11 @@ class IntegratedController:
                 "value": "failure",
                 "reason": "outside_window_or_already_successful",
             }
+        if signal.request_id is not None:
+            result["request_id"] = signal.request_id
+        if event is not None and getattr(event, "timing", None) is not None:
+            result["timing"] = event.timing
+            result["delta_ms"] = round(event.delta_ms, 1)
         await self._send_message(result)
 
     async def _handle_weak_point(self, signal: Signal) -> None:

@@ -1,6 +1,7 @@
 """実デバイスを使わず設定、判定、DAC時刻、リソース解放を検証。"""
 import json
 import io
+import os
 from dataclasses import replace
 from pathlib import Path
 import tempfile
@@ -658,9 +659,15 @@ class PlayerTests(unittest.TestCase):
 
 
 class KeyboardTests(unittest.TestCase):
-    def test_repeat_release_and_discard(self):
+    @unittest.skipUnless(os.name == "nt", "Windowsのコンソール構造体の配置を実OSで確認する。")
+    def test_windows_console_record_layout(self):
         import ctypes
-        from chambara_bgm.keyboard import Keyboard, _Record
+        from chambara_bgm.keyboard import _Record
+
+        self.assertEqual(ctypes.sizeof(_Record), 20)
+
+    def test_repeat_release_and_discard(self):
+        from chambara_bgm.keyboard import Keyboard
 
         keyboard = Keyboard.__new__(Keyboard)
         keyboard.held = set()
@@ -683,7 +690,6 @@ class KeyboardTests(unittest.TestCase):
 
         keyboard.api = SimpleNamespace(GetNumberOfConsoleInputEvents=count_events,
                                        ReadConsoleInputW=read_events)
-        self.assertEqual(ctypes.sizeof(_Record), 20)
         pending.extend([(76, True, 1), (76, True, 20), (76, True, 1)])
         self.assertEqual([a for a, _ in keyboard.read()], ["life"])
         pending.extend([(76, True, 1)])
@@ -700,6 +706,7 @@ class CliTests(unittest.TestCase):
         keyboard = SimpleNamespace(read=lambda: batches.pop(0), discard=lambda: None,
                                    close=lambda: None)
         with patch("sys.argv", ["chambara-bgm"]), \
+             patch("chambara_bgm.cli.os", SimpleNamespace(name="nt")), \
              patch("chambara_bgm.keyboard.Keyboard", return_value=keyboard), \
              patch("chambara_bgm.cli.load_tracks", return_value=tracks()), \
              patch("chambara_bgm.cli.AudioPlayer", return_value=player), \

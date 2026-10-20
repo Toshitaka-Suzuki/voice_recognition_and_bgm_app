@@ -203,6 +203,7 @@ class IntegratedCliTests(unittest.TestCase):
             coroutine.close()
 
         with (
+            patch.object(cli.sys, "platform", "win32"),
             patch.object(cli, "load_settings", return_value=settings),
             patch.object(cli, "load_conversation_examples", return_value=examples),
             patch.object(cli, "load_tracks", return_value=[]),
@@ -283,6 +284,7 @@ class IntegratedControllerTests(unittest.IsolatedAsyncioTestCase):
                 "standby",
                 "pre_interview",
                 "pre_interview_finished",
+                "battle_started",
                 "post_interview",
                 "post_interview_finished",
                 "standby",
@@ -371,7 +373,7 @@ class IntegratedControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.messages,
             [
-                {"type": "connected", "text": "接続しました"},
+                {"type": "connected", "text": "接続しました", "protocol_version": 2, "conversation_mode": "live"},
                 {"type": "status", "value": "standby"},
             ],
         )

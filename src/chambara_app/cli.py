@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import sys
 from pathlib import Path
 
@@ -12,6 +11,7 @@ from chambara_bgm.config import load_tracks
 from chambara_bgm.display import ConsoleDisplay
 from chambara_bgm.engine import Game
 from chambara_bgm.player import AudioPlayer
+from chambara_bgm.rhythm import with_rhythm_guide
 from chambara_talk.audio import AudioRecorder
 from chambara_talk.config import load_conversation_examples, load_settings
 from chambara_talk.controller import ConversationController
@@ -22,6 +22,8 @@ from chambara_talk.tts import SpeechSynthesizer
 
 from .orchestrator import IntegratedController
 from .server import run_server
+from .mock_conversation import MockConversation
+from .silent_player import SilentAudioPlayer
 
 
 def project_root() -> Path:
@@ -53,16 +55,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--examples", type=Path, default=root / "data/conversation_examples.json")
     parser.add_argument("--bgm-config", type=Path, default=root / "config/bgm_settings.json")
     parser.add_argument("--audio-dir", type=Path, default=root / "data/bgm")
+    parser.add_argument("--mock-conversation", action="store_true",
+                        help="会話を3秒の模擬処理へ置換（LLM・マイク・音声認識・TTS不要）")
+    parser.add_argument("--silent-audio", action="store_true",
+                        help="模擬会話モードで音声出力を省略し、通信と判定を確認")
+    parser.add_argument("--no-rhythm-guide", action="store_true",
+                        help="4拍の予告を使わず、従来のBGM判定設定で動作")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     """全機能を初期化し、統合WebSocketサーバーを起動する。"""
 
-    if os.name != "nt":
-        print("統合アプリはWindows向けです。", file=sys.stderr)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.silent_audio and not args.mock_conversation:
+        parser.error("--silent-audioは--mock-conversationと一緒に指定してください。")
+    if sys.platform != "win32" and not args.mock_conversation:
+        print("実際の会話はWindows向けです。連携確認には--mock-conversationを指定してください。",
+              file=sys.stderr)
         return 1
-    args = build_parser().parse_args(argv)
     chat_backend = None
     game = None
     controller = None
@@ -74,31 +86,38 @@ def main(argv: list[str] | None = None) -> int:
         display.line(str(message), restore_status=True)
 
     try:
-        settings = load_settings(args.settings.resolve())
-        examples = load_conversation_examples(args.examples.resolve())
         tracks = load_tracks(args.bgm_config.resolve(), args.audio_dir.resolve())
-
-        recorder = AudioRecorder(settings.audio)
-        recognizer = SpeechRecognizer(settings.speech_recognition, examples.domain_terms)
-        chat_backend = create_chat_backend(settings.llm, examples.domain_terms)
-        synthesizer = SpeechSynthesizer(settings.tts)
-
-        conversation = ConversationController(
-            recorder=recorder,
-            recognizer=recognizer,
-            chat_backend=chat_backend,
-            synthesizer=synthesizer,
-            examples=examples,
-            strategy_question=settings.questions.strategy,
-            feedback_question=settings.questions.feedback,
-            feedback_human_win_question=settings.questions.feedback_human_win,
-            feedback_robot_win_question=settings.questions.feedback_robot_win,
-            output=terminal_output,
-            manual_input_enabled=False,
-        )
+        if not args.no_rhythm_guide:
+            tracks = tuple(with_rhythm_guide(track) for track in tracks)
+            terminal_output("4拍ガイド: タン・タン・タン・カン！ 最後の音に合わせて受けます。")
+        if args.mock_conversation:
+            conversation = MockConversation(terminal_output)
+            terminal_output("会話は模擬モードです。録音・音声認識・LLM・読み上げを使用しません。")
+            if args.silent_audio:
+                terminal_output("BGMは無音テストです。実機の音声同期は確認できません。")
+        else:
+            settings = load_settings(args.settings.resolve())
+            examples = load_conversation_examples(args.examples.resolve())
+            recorder = AudioRecorder(settings.audio)
+            recognizer = SpeechRecognizer(settings.speech_recognition, examples.domain_terms)
+            chat_backend = create_chat_backend(settings.llm, examples.domain_terms)
+            synthesizer = SpeechSynthesizer(settings.tts)
+            conversation = ConversationController(
+                recorder=recorder,
+                recognizer=recognizer,
+                chat_backend=chat_backend,
+                synthesizer=synthesizer,
+                examples=examples,
+                strategy_question=settings.questions.strategy,
+                feedback_question=settings.questions.feedback,
+                feedback_human_win_question=settings.questions.feedback_human_win,
+                feedback_robot_win_question=settings.questions.feedback_robot_win,
+                output=terminal_output,
+                manual_input_enabled=False,
+            )
         game = Game(
             tracks,
-            AudioPlayer(),
+            SilentAudioPlayer() if args.silent_audio else AudioPlayer(),
             display.event,
         )
 
@@ -119,9 +138,10 @@ def main(argv: list[str] | None = None) -> int:
             conversation,
             game,
             output=terminal_output,
-            prepare=prepare,
-            cleanup=chat_backend.close,
+            prepare=None if args.mock_conversation else prepare,
+            cleanup=chat_backend.close if chat_backend is not None else None,
             bgm_display=display,
+            conversation_mode="mock_silent" if args.silent_audio else "mock" if args.mock_conversation else "live",
         )
 
         async def run_application() -> None:

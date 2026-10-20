@@ -15,6 +15,10 @@ chambara_app（進行状態を一元管理）
 
 本アプリがWebSocketサーバーです。既定では`ws://127.0.0.1:8765`で待ち受け、最初の1接続だけを制御元として受け付けます。`reference/`のROS/rosbridgeとは別の直接WebSocket仕様です。
 
+`cobopro-chambara`の「プレイ画面」→「会話・BGM連携」から接続できます。
+画面がHP・制限時間・弱点表示を管理し、本アプリが会話・BGM・パリイ判定を担当します。
+接続時に通信仕様v2と会話モードを通知します。旧来の信号（request_idなし）も引き続き受理します。
+
 ## 2. 状態遷移
 
 ```text
@@ -81,8 +85,47 @@ chambara-app --host 192.168.10.10 --port 8765
 | `--examples` | `data/conversation_examples.json` | 会話例 |
 | `--bgm-config` | `config/bgm_settings.json` | 楽曲と判定区間 |
 | `--audio-dir` | `data/bgm` | BGMファイルのフォルダー |
+| `--mock-conversation` | 無効 | 会話を約3秒で完了する模擬処理に置換 |
+| `--silent-audio` | 無効 | 模擬会話モードで音声出力を省略 |
 
 統合アプリは会話中にEnterや`q`を受け付けません。アプリ全体を終了するときはCtrl+Cを押します。終了時はBGM、会話処理、WebSocket接続を片付けます。
+
+### LLMなしでブラウザー連携を確認する
+
+既存の環境では`python -m chambara_app --mock-conversation`で起動できます。
+このモードはマイク・認識モデル・LLM・TTSの設定読込と起動チェックを行いません。
+会話を模擬しても、BGMの音声出力と判定区間は通常の設定を使用します。
+Windowsに加えてMacでも起動できます。実際の会話・Windows音声を使う通常モードはWindows向けです。
+
+新しい環境で、LLMなどの依存を入れずに確認する場合は、Python 3.11または3.12で仮想環境を作り、次の最小依存だけをインストールしてください。
+
+```sh
+python -m pip install -r requirements-integration-test.txt
+```
+
+パッケージ全体をインストールしていない場合は、プロジェクト直下で`src`を指定して起動します。
+
+Mac / Linux:
+
+```sh
+PYTHONPATH=src python -m chambara_app --mock-conversation
+```
+
+Windows PowerShell:
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m chambara_app --mock-conversation
+```
+
+音声デバイスも使わず確認するときは、上記に`--silent-audio`を追加します。
+この場合も楽曲の長さと設定された判定区間を使用しますが、再生位置は単調時計で模擬します。
+音は出ず、音声出力と接触の同期精度は確認できません。画面にも模擬モードを表示します。
+`--silent-audio`を通常の会話と組み合わせることはできません。
+
+開始前の模擬会話→カウントダウン→BGM開始通知→受け・命中→感想の模擬会話→待機まで確認できます。
+画面の入力方法を「ゲームテスト（モック）」にするとSpaceで受け、1〜3で対応する弱点への命中、Bで紙風船破損を模擬します。
+無音版でもパリイが必ず成功するわけではありません。通常版と同じ判定区間を使います。
 
 ### 戦闘中のBGM・パリイ表示
 
@@ -133,6 +176,8 @@ python -m http.server 8000 --bind 127.0.0.1 --directory integration_test
 {"type":"signal","name":"parry"}
 {"type":"signal","name":"weak_point_count","count":2}
 {"type":"signal","name":"battle_end"}
+{"type":"signal","name":"game_cancel"}
+{"type":"signal","name":"heartbeat","request_id":"ping-1"}
 ```
 
 有効な信号には最初に受付通知を返します。弱点信号では`count`も返します。
@@ -145,10 +190,11 @@ python -m http.server 8000 --bind 127.0.0.1 --directory integration_test
 ### 本アプリから外部統合アプリ
 
 ```json
-{"type":"connected","text":"接続しました"}
+{"type":"connected","text":"接続しました","protocol_version":2,"conversation_mode":"live"}
 {"type":"status","value":"standby"}
 {"type":"status","value":"pre_interview"}
 {"type":"status","value":"pre_interview_finished"}
+{"type":"status","value":"battle_started"}
 {"type":"status","value":"post_interview"}
 {"type":"status","value":"post_interview_finished"}
 {"type":"parry_result","value":"success"}
@@ -157,6 +203,31 @@ python -m http.server 8000 --bind 127.0.0.1 --directory integration_test
 ```
 
 `not_ready`は、BGM開始直後や音声出力の同期を確認中で再生位置を決められない場合です。通常の失敗は、判定範囲外または同じ周回の同じ判定区間ですでに成功した場合です。
+
+`conversation_mode`は`live`、`mock`、`mock_silent`のいずれかです。
+`battle_start`の`received`は受付だけを表します。`game.start()`成功後に`battle_started`を送ります。
+音声出力開始直後はまだ`not_ready`になり得ます。開始失敗では`error`→`standby`になり、`battle_started`は送りません。
+
+すべての信号に省略可能な1〜64文字の`request_id`を付けられます。
+`received`に同じIDを返し、`parry_result`にも元の`parry`のIDを付けます。
+IDなしの従来の信号にはIDを追加しません。これは応答の対応付け用で、重複要求の排除や再送を保証するものではありません。
+パリイの判定時刻は従来どおりサーバー受信時刻です。
+
+```json
+{"type":"signal","name":"parry","request_id":"parry-42"}
+{"type":"received","name":"parry","text":"パリイを受信しました。","request_id":"parry-42"}
+{"type":"parry_result","value":"success","request_id":"parry-42"}
+```
+
+`game_cancel`はすべての状態で受理し、BGM停止・会話キャンセル・進行破棄の後、`standby`を送ります。
+中断では感想の会話を始めません。`heartbeat`は状態を変えず`received`だけを返します。
+ブラウザーは5秒ごとに接続を確認し、開始・終了処理や信号応答が10秒途切れた場合は接続を閉じます。
+会話そのものはこの10秒制限の対象ではなく、会話中もheartbeatを継続します。
+
+画面のEsc・準備への移動・センサ切断はゲーム中断になります。途中からの再開はしません。
+紙風船破損と時間切れは`battle_end`でロボット勝利として扱います。
+ブラウザー内の仮BGMは連携中に止め、効果音だけを使用します。画面の効果音OFFはPython側の音声をミュートしません。
+ROSや実物のライト制御、認識文・返答本文の画面への配信はこの通信には含みません。
 
 不正JSON、現在状態に合わない信号、弱点残数の増加には、現在状態付きのエラーを返します。接続は閉じません。
 
@@ -201,3 +272,23 @@ python -m unittest discover -s tests -v
 単体テストは偽のマイク、LLM、TTS、BGMを使い、状態遷移とJSONを確認します。CodexのWindowsサンドボックスでは`asyncio`の自己通信用socketを作れないため、非同期統合テストを明示的にスキップします。通常のWindows環境では実行されます。
 
 実際のBGM出力時刻、100ms状態表示、パリイ同期精度、マイク、連続TTS、別PCのLAN経路、外部統合アプリとの接続は、上記の模擬画面または実機で別に確認してください。テスト成功だけで実機確認済みとは扱いません。
+
+## 8. 4拍ガイドによるブラウザー連携
+
+統合版は既定で4拍ガイドを有効にします。`--mock-conversation`でも実際のBGMと予告音を再生できます。
+「タン・タン・タン・カン！」の最後の高い音で受けます。`config/bgm_settings.json`の基準位置を4個ずつまとめ、4個目を目標にします。
+元の曲と設定ファイルは変更せず、統合版の起動時に判定区間と予告音レイヤーを作ります。単独の`chambara_bgm`は従来どおりです。
+ガイド中は全難易度で目標の前後150ms、終端を含まない300ms区間を使用します。曲末で区間がはみ出る4拍は使用しません。
+`--no-rhythm-guide`を付けると、従来の判定幅・毎拍判定へ戻せます。旧ブラウザー・既存通信サンプルを使う場合もこのオプションを指定してください。
+
+### 追加の通信仕様（v2の任意拡張）
+
+- `connected`に`rhythm_guide: true`がある場合だけ、ブラウザーは下記のガイド信号を送ります。
+- `rhythm_sync`への応答は`rhythm_state`。同じ`request_id`を返し、`ready`、`active`、`generation`、`stage`、`position_ms`、4個の`beats_ms`、`window_ms`を含みます。時刻は曲の周回を含む絶対再生位置（ms）で、別PCの時計を直接比較しません。再生位置が不明なら`ready: false`です。
+- `defense_pause`は予告音と受け判定を止めます。BGMは継続します。成功・失敗を確定した時点でもPython側で自動停止します。
+- `defense_ready`は次の受けを準備します。現在位置から120ms以上先の完全な4拍を選び、その1拍目から予告音を再開します。以前の攻撃区間は受け付けません。
+- `parry_result`には`timing: "on_time" | "early" | "late"`と`delta_ms`（負は早い、正は遅い）を追加します。ガイド中の最寄りの有効な目標を基準にします。
+- 音声の準備中は予告も判定も確定しません。画面は古い同期情報を使用し続けず、再同期を待ちます。
+
+予告音はBGMと同じ出力コールバックでサンプル位置を合わせて混ぜます。画面は200msごとに音声位置を問い合わせ、往復時間の半分を補正して補間します。
+これはローカルでの体験確認用です。実際のロボット動作とは未連携で、入力のネットワーク到着遅延・画面遅延・USB遅延の厳密な補正はしていません。

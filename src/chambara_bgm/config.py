@@ -18,6 +18,9 @@ class Track:
     samples: object
     sample_rate: int
     excluded_window_count: int = 0
+    beats_ms: tuple[float, ...] = ()
+    guide: object | None = None
+    guide_samples: object | None = None
 
     @property
     def duration_ms(self):
@@ -127,7 +130,9 @@ def load_tracks(config_path: Path, audio_dir: Path) -> tuple[Track, ...]:
                 raise ValueError("音声はBGMフォルダ内のWAVまたはOGGを指定してください")
             samples, rate = _load_audio(path)
             windows, excluded = _load_windows(stage, data["version"], len(samples), rate)
-            tracks.append(Track(stage["id"], windows, samples, rate, excluded))
+            beats = tuple(item["start_ms"] for item in stage["parry_windows"]
+                          if item["start_ms"] < len(samples) * 1000 / rate)
+            tracks.append(Track(stage["id"], windows, samples, rate, excluded, beats))
         return tuple(tracks)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, wave.Error, EOFError) as exc:
         raise ValueError(f"BGM設定の読み込みに失敗しました: {exc}") from exc

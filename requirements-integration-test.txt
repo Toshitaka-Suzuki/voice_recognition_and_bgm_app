@@ -1,0 +1,5 @@
+# 会話を模擬して、実BGMまたは無音のWebSocket連携を確認する最小依存。
+numpy>=1.26,<3
+soundfile>=0.13.1,<1
+sounddevice>=0.5.0,<1
+websockets>=14,<18
