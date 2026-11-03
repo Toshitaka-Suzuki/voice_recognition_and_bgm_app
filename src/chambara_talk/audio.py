@@ -49,6 +49,8 @@ class SilenceDetector:
 class AudioRecorder:
     """sounddeviceを使い、メモリ上へモノラル音声を録音する。"""
 
+    supports_ready_callback = True
+
     def __init__(
         self,
         settings: AudioSettings,
@@ -82,7 +84,7 @@ class AudioRecorder:
         except Exception as exc:
             raise AudioError(f"利用可能な入力マイクを確認できません: {exc}") from exc
 
-    def record_until_silence(self, *, cancel_event=None) -> AudioData:
+    def record_until_silence(self, *, cancel_event=None, on_ready: Callable[[], None] | None = None) -> AudioData:
         """発話を録音し、無音または最大時間で終了した結果を返す。
 
         音声はファイルへ保存せずNumPy配列として返します。マイクからデータを
@@ -146,6 +148,13 @@ class AudioRecorder:
                     ambient_rms * self.settings.noise_multiplier,
                 )
                 detector = SilenceDetector(threshold, self.settings.silence_seconds)
+                self._check_cancel(cancel_event)
+                if on_ready is not None:
+                    try:
+                        on_ready()
+                    except Exception as exc:
+                        # 画面への通知に失敗しても、マイクの録音は続けます。
+                        self.output(f"録音準備の通知に失敗しました: {exc}")
                 self.output(f"録音中です。話してください（検出しきい値: {threshold:.4f}）")
 
                 wait_started_at = time.monotonic()

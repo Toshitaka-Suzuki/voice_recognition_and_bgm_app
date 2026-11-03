@@ -1,0 +1,46 @@
+{
+  "audio": {
+    "sample_rate": 16000,
+    "channels": 1,
+    "silence_seconds": 2.0,
+    "speech_wait_timeout_seconds": 10.0,
+    "max_recording_seconds": 20.0,
+    "calibration_seconds": 0.5,
+    "block_seconds": 0.05,
+    "minimum_rms_threshold": 0.01,
+    "noise_multiplier": 3.0,
+    "pre_roll_seconds": 0.3,
+    "input_device": null
+  },
+  "speech_recognition": {
+    "model": "small",
+    "device": "cpu",
+    "compute_type": "int8",
+    "language": "ja",
+    "beam_size": 5
+  },
+  "llm": {
+    "host": "http://localhost:11434",
+    "model": "gemma4:12b",
+    "production_model": "gpt-oss:20b",
+    "timeout_seconds": 120.0,
+    "temperature": 0.4,
+    "max_response_chars": 80
+  },
+  "tts": {
+    "provider": "voicevox",
+    "host": "http://127.0.0.1:50021",
+    "speaker_id": 21,
+    "speed_scale": 1.0,
+    "pitch_scale": 0.0,
+    "intonation_scale": 1.0,
+    "volume": 1.0,
+    "timeout_seconds": 30.0
+  },
+  "questions": {
+    "strategy": "いざ勝負でござる！ どんな作戦で挑むのか、意気込みを聞かせてくだされ。",
+    "feedback": "お疲れさまでござる！ チャンバラをやってみた感想を聞かせてくだされ。",
+    "feedback_human_win": "見事な勝利でござる！ チャンバラをやってみた感想を聞かせてくだされ。",
+    "feedback_robot_win": "惜しい勝負でござった！ チャンバラをやってみた感想を聞かせてくだされ。"
+  }
+}

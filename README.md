@@ -43,13 +43,39 @@ LLMなしで確認する場合は`python -m chambara_app --mock-conversation`で
 さらに`--silent-audio`を付けると音声出力も省略できます。これらの模擬モードはMacでも実行でき、録音・認識モデル・LLM・TTSは起動しません。
 最小依存だけのセットアップは[統合動作確認ガイド](docs/integration-guide.md#llmなしでブラウザー連携を確認する)を参照してください。
 
+以下は従来のHarukaを使う場合の構成です。MacまたはVOICEVOXの声を使う場合は[VOICEVOXガイド](docs/voicevox-guide.md)を参照してください。
+
 - Windows 10または11（64bit）
-- Python 3.11（64bit）
+- Python 3.11または3.12（64bit）
 - 入力マイク
 - [Ollama](https://ollama.com/) とローカルLLM、またはGitHub Copilotの利用権限とインターネット接続
 - Windowsの日本語音声 `Microsoft Haruka Desktop - Japanese`
 
 現在の開発PC向け既定モデルは `qwen2.5:3b`、高性能な本番PC向けモデルは `gpt-oss:20b` です。
+
+## より自然な声をローカルで使う（VOICEVOX）
+
+Harukaの代わりに、ローカルで動くVOICEVOXを選べます。固定の質問とLLMの返答の両方に使い、音声データをクラウドへ送る必要はありません。声・話速・高さ・抑揚を設定できます。
+
+**会話アプリを起動する前に、別のプロセスとしてVOICEVOXを起動しておく必要があります。** 会話アプリはVOICEVOXを自動起動しません。
+
+[VOICEVOXの準備と3種類の声の聴き比べ](docs/voicevox-guide.md)を参照してください。`config/settings.voicevox.json`はCPU音声認識とOllamaを使うMac/Windows用の設定です。従来のWindows/Haruka設定はそのまま利用できます。
+
+## MacでPythonが見つからない場合
+
+このアプリはPython 3.11または3.12を使います。Mac標準の `python3` が3.9などの場合は使えません。`python3.11` が見つからなくても、インストール済みの `python3.12` で仮想環境を作成できます。
+
+既に `.venv/bin/python --version` が3.11または3.12を表示する場合は、作成手順を省略してください。仮想環境がなく、`python3.11` と `python3.12` も見つからない場合は、リポジトリ直下で次を実行します。uvがPython 3.12を取得し、pip入りの `.venv` を作成します。uvが導入済みなら1行目は不要です。
+
+```sh
+curl -LsSf https://astral.sh/uv/install.sh | sh
+"$HOME/.local/bin/uv" venv --python 3.12 --seed .venv
+.venv/bin/python --version
+```
+
+以降は `.venv/bin/python` を使用し、[VOICEVOXガイド](docs/voicevox-guide.md)の依存インストール・起動へ進んでください。
+
+公式手順: [uvのインストール](https://docs.astral.sh/uv/getting-started/installation/)、[Pythonの取得](https://docs.astral.sh/uv/guides/install-python/)。
 
 ## セットアップ
 

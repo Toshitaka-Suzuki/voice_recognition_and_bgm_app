@@ -1,8 +1,76 @@
 """無音判定だけを切り出し、実際のマイクを使わず確認するテスト。"""
 
 import unittest
+from dataclasses import replace
+from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
-from chambara_talk.audio import SilenceDetector
+from chambara_talk.audio import AudioRecorder, SilenceDetector
+from chambara_talk.config import load_settings
+from chambara_talk.errors import ConversationCancelled
+
+
+class RecorderReadyTests(unittest.TestCase):
+    """マイクを開かず、環境音測定後にだけ準備完了になることを確認する。"""
+
+    def setUp(self):
+        import numpy as np
+
+        settings = load_settings(Path(__file__).resolve().parents[1] / "config/settings.json").audio
+        self.recorder = AudioRecorder(replace(
+            settings, sample_rate=100, block_seconds=0.1, calibration_seconds=0.2,
+            silence_seconds=0.2,
+        ), output=lambda _: None)
+        self.entered = False
+        self.closed = False
+
+        def input_stream(**kwargs):
+            owner = self
+
+            class Stream:
+                def __enter__(self):
+                    owner.entered = True
+                    for level in (0.0, 0.0, 0.5, 0.0, 0.0):
+                        kwargs["callback"](np.full((10, 1), level), 10, None, False)
+                    return self
+
+                def __exit__(self, *_args):
+                    owner.closed = True
+
+            return Stream()
+
+        self.audio_module = SimpleNamespace(InputStream=input_stream)
+
+    def test_ready_callback_follows_calibration_with_open_stream(self):
+        ready = []
+        with patch.dict("sys.modules", sounddevice=self.audio_module), patch.object(self.recorder, "_rms", wraps=self.recorder._rms) as rms:
+            def on_ready():
+                self.assertTrue(self.entered)
+                self.assertFalse(self.closed)
+                self.assertEqual(rms.call_count, 2)
+                ready.append(True)
+
+            result = self.recorder.record_until_silence(on_ready=on_ready)
+        self.assertTrue(result.speech_detected)
+        self.assertEqual(ready, [True])
+        self.assertTrue(self.closed)
+
+    def test_cancelled_calibration_never_announces_ready(self):
+        cancel = Event()
+        cancel.set()
+        ready = Mock()
+        with patch.dict("sys.modules", sounddevice=self.audio_module), self.assertRaises(ConversationCancelled):
+            self.recorder.record_until_silence(cancel_event=cancel, on_ready=ready)
+        ready.assert_not_called()
+        self.assertTrue(self.closed)
+
+    def test_ready_notification_failure_does_not_break_recording(self):
+        with patch.dict("sys.modules", sounddevice=self.audio_module):
+            result = self.recorder.record_until_silence(on_ready=Mock(side_effect=RuntimeError("display failed")))
+        self.assertTrue(result.speech_detected)
+        self.assertTrue(self.closed)
 
 
 class SilenceDetectorTests(unittest.TestCase):

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .errors import ConfigurationError
 from .models import ConversationExample, ConversationExamples, ConversationPhase
@@ -54,11 +56,18 @@ class LLMSettings:
 
 @dataclass(frozen=True)
 class TTSSettings:
-    """pyttsx3で使用する音声、速度、音量の設定値。"""
+    """読み上げ方式と、各エンジンで使用する音声設定。"""
 
-    voice_match: str
-    rate: int
-    volume: float
+    voice_match: str = "Haruka"
+    rate: int = 175
+    volume: float = 1.0
+    provider: str = "pyttsx3"
+    host: str = "http://127.0.0.1:50021"
+    speaker_id: int = 11
+    speed_scale: float = 1.0
+    pitch_scale: float = 0.0
+    intonation_scale: float = 1.0
+    timeout_seconds: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -121,7 +130,12 @@ def _number(data: dict[str, Any], key: str, label: str, *, minimum: float = 0) -
     """辞書から下限以上の数値を取り出し、``float``として返す。"""
 
     value = data.get(key)
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < minimum:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < minimum
+    ):
         raise ConfigurationError(f"{label}.{key} は {minimum} 以上の数値で指定してください。")
     return float(value)
 
@@ -136,6 +150,61 @@ def _integer(data: dict[str, Any], key: str, label: str, *, minimum: int = 1) ->
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise ConfigurationError(f"{label}.{key} は {minimum} 以上の整数で指定してください。")
     return value
+
+
+def load_tts_settings(value: Any) -> TTSSettings:
+    """LLMやマイクを初期化せず、試聴でも使える音声設定を検証する。"""
+
+    tts = _mapping(value, "tts")
+    provider = tts.get("provider", "pyttsx3")
+    if provider not in ("pyttsx3", "voicevox"):
+        raise ConfigurationError("tts.provider は pyttsx3 または voicevox を指定してください。")
+    volume = _number(tts, "volume", "tts")
+    if volume > 1:
+        raise ConfigurationError("tts.volume は0から1の範囲で指定してください。")
+    if provider == "pyttsx3":
+        return TTSSettings(
+            voice_match=_string(tts, "voice_match", "tts"),
+            rate=_integer(tts, "rate", "tts"),
+            volume=volume,
+        )
+
+    fields = {
+        "host": "http://127.0.0.1:50021",
+        "speaker_id": 11,
+        "speed_scale": 1.0,
+        "pitch_scale": 0.0,
+        "intonation_scale": 1.0,
+        "timeout_seconds": 30.0,
+        **tts,
+    }
+    host = _string(fields, "host", "tts").rstrip("/")
+    try:
+        url = urlsplit(host)
+        valid_url = (
+            url.scheme in ("http", "https") and url.hostname and url.port != 0
+            and not url.username and not url.password
+            and not url.query and not url.fragment and not url.path
+        )
+    except ValueError:
+        valid_url = False
+    if not valid_url:
+        raise ConfigurationError("tts.host は http://127.0.0.1:50021 のような接続先を指定してください。")
+    bounded = {}
+    for key, minimum, maximum in (
+        ("speed_scale", 0.5, 2.0),
+        ("pitch_scale", -0.15, 0.15),
+        ("intonation_scale", 0.0, 2.0),
+        ("timeout_seconds", 1.0, 120.0),
+    ):
+        bounded[key] = _number(fields, key, "tts", minimum=minimum)
+        if bounded[key] > maximum:
+            raise ConfigurationError(f"tts.{key} は {minimum}～{maximum} の範囲で指定してください。")
+    return TTSSettings(
+        provider="voicevox", volume=volume, host=host,
+        speaker_id=_integer(fields, "speaker_id", "tts", minimum=0),
+        **bounded,
+    )
 
 
 def load_settings(path: Path) -> AppSettings:
@@ -165,10 +234,7 @@ def load_settings(path: Path) -> AppSettings:
     ):
         raise ConfigurationError("audio.input_device は整数、文字列、または null で指定してください。")
 
-    # 音量は一般的なpyttsx3の範囲である0～1に限定します。
-    volume = _number(tts, "volume", "tts", minimum=0)
-    if volume > 1:
-        raise ConfigurationError("tts.volume は0から1の範囲で指定してください。")
+    tts_settings = load_tts_settings(tts)
 
     # 検証済みの辞書を、用途ごとのdataclassへ変換します。
     return AppSettings(
@@ -207,11 +273,7 @@ def load_settings(path: Path) -> AppSettings:
             max_response_chars=_integer(llm, "max_response_chars", "llm"),
             provider=provider,
         ),
-        tts=TTSSettings(
-            voice_match=_string(tts, "voice_match", "tts"),
-            rate=_integer(tts, "rate", "tts"),
-            volume=volume,
-        ),
+        tts=tts_settings,
         questions=QuestionSettings(
             strategy=_string(questions, "strategy", "questions"),
             feedback=_string(questions, "feedback", "questions"),

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from chambara_talk.config import load_conversation_examples, load_settings
+from chambara_talk.config import load_conversation_examples, load_settings, load_tts_settings
 from chambara_talk.errors import ConfigurationError
 from chambara_talk.models import ConversationPhase
 
@@ -16,6 +16,75 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class ConfigTests(unittest.TestCase):
     """正しい設定の読み込みと、不正な設定の拒否を検証する。"""
+
+    def test_legacy_tts_settings_keep_windows_voice(self) -> None:
+        """接続先を省略した既存設定は、声・速度・音量を変えず読み込む。"""
+
+        tts = load_tts_settings({"voice_match": "Haruka", "rate": 175, "volume": 0.7})
+        self.assertEqual(tts.provider, "pyttsx3")
+        self.assertEqual(tts.voice_match, "Haruka")
+        self.assertEqual(tts.rate, 175)
+        self.assertEqual(tts.volume, 0.7)
+
+    def test_voicevox_defaults_do_not_require_windows_voice_fields(self) -> None:
+        tts = load_tts_settings({"provider": "voicevox", "volume": 1.0})
+        self.assertEqual(tts.provider, "voicevox")
+        self.assertEqual(tts.host, "http://127.0.0.1:50021")
+        self.assertEqual(tts.speaker_id, 11)
+        self.assertEqual(tts.speed_scale, 1.0)
+        self.assertEqual(tts.pitch_scale, 0.0)
+        self.assertEqual(tts.intonation_scale, 1.0)
+        self.assertEqual(tts.timeout_seconds, 30.0)
+
+    def test_voicevox_preset_uses_local_model_and_cpu_recognition(self) -> None:
+        settings = load_settings(ROOT / "config/settings.voicevox.json")
+        self.assertEqual(settings.tts.provider, "voicevox")
+        self.assertEqual(settings.llm.provider, "ollama")
+        self.assertEqual(settings.llm.model, "gemma4:12b")
+        self.assertEqual(settings.speech_recognition.device, "cpu")
+        self.assertEqual(settings.speech_recognition.compute_type, "int8")
+
+    def test_voicevox_accepts_explicit_controls_and_normalizes_host(self) -> None:
+        tts = load_tts_settings({
+            "provider": "voicevox", "host": "http://localhost:50022/", "speaker_id": 0,
+            "volume": 0.0, "speed_scale": 0.5, "pitch_scale": -0.15,
+            "intonation_scale": 2.0, "timeout_seconds": 120.0,
+        })
+        self.assertEqual(tts.host, "http://localhost:50022")
+        self.assertEqual(tts.speaker_id, 0)
+        self.assertEqual(tts.volume, 0.0)
+        self.assertEqual(tts.speed_scale, 0.5)
+        self.assertEqual(tts.pitch_scale, -0.15)
+        self.assertEqual(tts.intonation_scale, 2.0)
+        self.assertEqual(tts.timeout_seconds, 120.0)
+
+    def test_unknown_tts_provider_is_rejected(self) -> None:
+        for provider in ("unknown", "", None, True, [], {}):
+            with self.subTest(provider=provider), self.assertRaises(ConfigurationError):
+                load_tts_settings({"provider": provider, "volume": 1.0})
+
+    def test_voicevox_invalid_controls_are_rejected(self) -> None:
+        invalid = {
+            "speaker_id": (-1, True, 1.5, "11"),
+            "volume": (-0.1, 1.1, True, "1", float("nan"), float("inf")),
+            "speed_scale": (0.49, 2.01, True, "1", float("nan")),
+            "pitch_scale": (-0.16, 0.16, float("inf")),
+            "intonation_scale": (-0.01, 2.01, float("nan")),
+            "timeout_seconds": (0, 121, float("inf")),
+        }
+        for key, values in invalid.items():
+            for value in values:
+                with self.subTest(key=key, value=value), self.assertRaises(ConfigurationError):
+                    load_tts_settings({"provider": "voicevox", "volume": 1.0, key: value})
+
+    def test_voicevox_invalid_endpoints_are_rejected(self) -> None:
+        for host in (
+            "localhost:50021", "file:///tmp/engine", "http://", "http://localhost:0",
+            "http://localhost:70000", "http://localhost:bad", "http://user:password@localhost:50021",
+            "http://localhost:50021/api", "http://localhost:50021?x=1", "http://localhost:50021#x",
+        ):
+            with self.subTest(host=host), self.assertRaises(ConfigurationError):
+                load_tts_settings({"provider": "voicevox", "volume": 1.0, "host": host})
 
     def test_copilot_settings_and_default_model(self) -> None:
         """CPU用設定を読み、Copilotのmodel省略時はautoになる。"""

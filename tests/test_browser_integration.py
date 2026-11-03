@@ -56,7 +56,7 @@ class BrowserProtocolTests(unittest.TestCase):
             patch.object(cli, "create_chat_backend") as llm,
             patch.object(cli, "AudioRecorder") as recorder,
             patch.object(cli, "SpeechRecognizer") as recognizer,
-            patch.object(cli, "SpeechSynthesizer") as tts,
+            patch.object(cli, "create_synthesizer") as tts,
             patch.object(cli, "AudioPlayer") as player,
             patch.object(cli, "Game"),
             patch.object(cli, "ConsoleDisplay"),

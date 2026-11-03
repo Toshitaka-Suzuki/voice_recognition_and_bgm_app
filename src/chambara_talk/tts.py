@@ -112,3 +112,15 @@ class SpeechSynthesizer:
             return True
         except Exception as exc:
             raise TTSError(f"音声の読み上げに失敗しました: {exc}") from exc
+
+
+def create_synthesizer(settings: TTSSettings, output: Callable[[str], None] = print):
+    """既存のWindows音声とVOICEVOXを、設定で選択する。"""
+
+    if settings.provider == "pyttsx3":
+        return SpeechSynthesizer(settings, output=output)
+    if settings.provider == "voicevox":
+        from .voicevox_tts import VoicevoxSynthesizer
+
+        return VoicevoxSynthesizer(settings, output=output)
+    raise TTSError("未対応の音声接続先です。tts.providerはpyttsx3またはvoicevoxを指定してください。")

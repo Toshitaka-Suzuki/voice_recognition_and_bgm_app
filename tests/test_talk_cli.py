@@ -14,7 +14,7 @@ class TalkCliTests(unittest.TestCase):
         """finallyが起動チェック失敗と会話中の終了の両方を扱う。"""
 
         for reason in ("complete", "quit", "interrupt", "startup_error"):
-            with self.subTest(reason=reason), patch("chambara_talk.cli.AudioRecorder"), patch("chambara_talk.cli.SpeechRecognizer"), patch("chambara_talk.cli.SpeechSynthesizer"), patch("chambara_talk.cli.create_chat_backend") as factory, patch("chambara_talk.cli.ConversationController") as controller, patch("builtins.print"):
+            with self.subTest(reason=reason), patch("chambara_talk.cli.AudioRecorder"), patch("chambara_talk.cli.SpeechRecognizer"), patch("chambara_talk.cli.create_synthesizer"), patch("chambara_talk.cli.create_chat_backend") as factory, patch("chambara_talk.cli.ConversationController") as controller, patch("builtins.print"):
                 backend = Mock()
                 factory.return_value = backend
                 if reason == "startup_error":

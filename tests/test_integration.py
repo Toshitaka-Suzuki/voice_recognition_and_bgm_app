@@ -210,7 +210,7 @@ class IntegratedCliTests(unittest.TestCase):
             patch.object(cli, "AudioRecorder"),
             patch.object(cli, "SpeechRecognizer"),
             patch.object(cli, "create_chat_backend", return_value=Mock()),
-            patch.object(cli, "SpeechSynthesizer"),
+            patch.object(cli, "create_synthesizer"),
             patch.object(cli, "ConversationController") as conversation_class,
             patch.object(cli, "AudioPlayer"),
             patch.object(cli, "ConsoleDisplay") as display_class,

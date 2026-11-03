@@ -15,10 +15,10 @@ from chambara_bgm.rhythm import with_rhythm_guide
 from chambara_talk.audio import AudioRecorder
 from chambara_talk.config import load_conversation_examples, load_settings
 from chambara_talk.controller import ConversationController
-from chambara_talk.errors import ChambaraTalkError
+from chambara_talk.errors import ChambaraTalkError, ConfigurationError
 from chambara_talk.llm import create_chat_backend
 from chambara_talk.speech import SpeechRecognizer
-from chambara_talk.tts import SpeechSynthesizer
+from chambara_talk.tts import create_synthesizer
 
 from .orchestrator import IntegratedController
 from .server import run_server
@@ -71,10 +71,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.silent_audio and not args.mock_conversation:
         parser.error("--silent-audioは--mock-conversationと一緒に指定してください。")
-    if sys.platform != "win32" and not args.mock_conversation:
-        print("実際の会話はWindows向けです。連携確認には--mock-conversationを指定してください。",
-              file=sys.stderr)
-        return 1
     chat_backend = None
     game = None
     controller = None
@@ -97,11 +93,16 @@ def main(argv: list[str] | None = None) -> int:
                 terminal_output("BGMは無音テストです。実機の音声同期は確認できません。")
         else:
             settings = load_settings(args.settings.resolve())
+            if sys.platform != "win32" and settings.tts.provider != "voicevox":
+                raise ConfigurationError(
+                    "Macで実会話を使う場合は --settings config/settings.voicevox.json を指定してください。"
+                    "模擬会話は --mock-conversation で起動できます。"
+                )
             examples = load_conversation_examples(args.examples.resolve())
             recorder = AudioRecorder(settings.audio)
             recognizer = SpeechRecognizer(settings.speech_recognition, examples.domain_terms)
             chat_backend = create_chat_backend(settings.llm, examples.domain_terms)
-            synthesizer = SpeechSynthesizer(settings.tts)
+            synthesizer = create_synthesizer(settings.tts)
             conversation = ConversationController(
                 recorder=recorder,
                 recognizer=recognizer,

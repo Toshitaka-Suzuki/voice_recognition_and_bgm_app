@@ -12,7 +12,7 @@ from .controller import ConversationController
 from .errors import ChambaraTalkError
 from .llm import create_chat_backend
 from .speech import SpeechRecognizer
-from .tts import SpeechSynthesizer
+from .tts import create_synthesizer
 
 
 def project_root() -> Path:
@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         recorder = AudioRecorder(settings.audio)
         recognizer = SpeechRecognizer(settings.speech_recognition, examples.domain_terms)
         chat_backend = create_chat_backend(settings.llm, examples.domain_terms)
-        synthesizer = SpeechSynthesizer(settings.tts)
+        synthesizer = create_synthesizer(settings.tts)
 
         # 会話を始める前に、マイク・音声・LLM・認識モデルを順番に確認します。
         if settings.llm.provider == "copilot":

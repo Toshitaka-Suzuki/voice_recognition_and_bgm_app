@@ -75,6 +75,8 @@ class RecognitionConfirmation:
 class ConversationController:
     """会話フェーズを実行し、専門部品を決められた順序で呼び出す。"""
 
+    supports_progress = True
+
     def __init__(
         self,
         *,
@@ -139,11 +141,14 @@ class ConversationController:
         *,
         outcome: FeedbackOutcome | None = None,
         cancel_event: Event | None = None,
+        on_progress: Callable[[dict[str, str]], None] | None = None,
     ) -> PhaseRunResult:
         """指定した1フェーズだけを実行し、完了・中断・終了を返す。"""
 
         try:
-            return self._run_phase(phase, outcome=outcome, cancel_event=cancel_event)
+            return self._run_phase(
+                phase, outcome=outcome, cancel_event=cancel_event, on_progress=on_progress
+            )
         except ConversationCancelled:
             return PhaseRunResult.CANCELLED
         except (EOFError, KeyboardInterrupt):
@@ -156,8 +161,21 @@ class ConversationController:
         *,
         outcome: FeedbackOutcome | None,
         cancel_event: Event | None,
+        on_progress: Callable[[dict[str, str]], None] | None = None,
     ) -> PhaseRunResult:
         """1フェーズ分の質問からコメント読み上げまでを行う。"""
+
+        def progress(stage: str, **details: str) -> None:
+            if on_progress is None or self._cancelled(cancel_event):
+                return
+            try:
+                on_progress({"stage": stage, **details})
+            except Exception as exc:
+                # 表示の失敗で会話そのものを止めないよう、通知を分離します。
+                self.output(f"会話進行の通知に失敗しました: {exc}")
+
+        def speech_failed() -> None:
+            progress("retry", reason="speech_failed")
 
         if self._cancelled(cancel_event):
             return PhaseRunResult.CANCELLED
@@ -168,7 +186,8 @@ class ConversationController:
             else self.questions[phase]
         )
         self.output(f"\n{question}")
-        if not self._speak_or_report(question, cancel_event):
+        progress("question", text=question)
+        if not self._speak_or_report(question, cancel_event, on_error=speech_failed):
             return PhaseRunResult.CANCELLED
 
         while True:
@@ -188,16 +207,17 @@ class ConversationController:
             if self._cancelled(cancel_event):
                 return PhaseRunResult.CANCELLED
 
+            progress("preparing")
             try:
-                audio = (
-                    self.recorder.record_until_silence()
-                    if cancel_event is None
-                    else self.recorder.record_until_silence(cancel_event=cancel_event)
-                )
+                record_options = {} if cancel_event is None else {"cancel_event": cancel_event}
+                if on_progress is not None and getattr(self.recorder, "supports_ready_callback", False) is True:
+                    record_options["on_ready"] = lambda: progress("listening")
+                audio = self.recorder.record_until_silence(**record_options)
             except ConversationCancelled:
                 return PhaseRunResult.CANCELLED
             except AudioError as exc:
                 self.output(f"録音エラー: {exc}")
+                progress("retry", reason="recording_failed")
                 if not self._wait_before_retry(cancel_event):
                     return PhaseRunResult.CANCELLED
                 continue
@@ -205,15 +225,18 @@ class ConversationController:
                 return PhaseRunResult.CANCELLED
             if not audio.speech_detected:
                 self.output("発話を検出できませんでした。もう一度録音してください。")
+                progress("retry", reason="no_speech")
                 if not self._wait_before_retry(cancel_event):
                     return PhaseRunResult.CANCELLED
                 continue
 
             self.output("音声を認識しています...")
+            progress("recognizing")
             try:
                 result = self.recognizer.transcribe(audio)
             except SpeechRecognitionError as exc:
                 self.output(f"音声認識エラー: {exc}")
+                progress("retry", reason="recognition_failed")
                 if not self._wait_before_retry(cancel_event):
                     return PhaseRunResult.CANCELLED
                 continue
@@ -224,6 +247,7 @@ class ConversationController:
             )
             if result.is_empty:
                 self.output("認識結果が空でした。もう一度録音してください。")
+                progress("retry", reason="empty_transcript")
                 if not self._wait_before_retry(cancel_event):
                     return PhaseRunResult.CANCELLED
                 continue
@@ -245,6 +269,7 @@ class ConversationController:
                 return PhaseRunResult.CANCELLED
             self.output(f"LLMへ渡す会話例: {len(phase_examples)}件（{phase.value}）")
             self.output("コメントを生成しています...")
+            progress("thinking", text=result.text)
             try:
                 comment = (
                     self.chat_backend.generate(phase, result.text, phase_examples)
@@ -255,6 +280,7 @@ class ConversationController:
                 )
             except LLMError as exc:
                 self.output(f"LLMエラー: {exc}")
+                progress("retry", reason="reply_failed")
                 self.output("同じフェーズの録音待機へ戻ります。")
                 self._set_recording_state(phase)
                 if not self._wait_before_retry(cancel_event):
@@ -265,7 +291,8 @@ class ConversationController:
 
             self.output("\nロボットのコメント:")
             self.output(comment)
-            if not self._speak_or_report(comment, cancel_event):
+            progress("speaking", text=comment)
+            if not self._speak_or_report(comment, cancel_event, on_error=speech_failed):
                 return PhaseRunResult.CANCELLED
             return PhaseRunResult.COMPLETED
 
@@ -280,7 +307,9 @@ class ConversationController:
         time.sleep(AUTO_RETRY_DELAY_SECONDS)
         return True
 
-    def _speak_or_report(self, text: str, cancel_event: Event | None) -> bool:
+    def _speak_or_report(
+        self, text: str, cancel_event: Event | None, *, on_error: Callable[[], None] | None = None
+    ) -> bool:
         """文章を読み上げ、キャンセルなら``False``を返す。"""
 
         if self._cancelled(cancel_event):
@@ -294,6 +323,8 @@ class ConversationController:
                     return False
         except TTSError as exc:
             self.output(f"音声合成エラー: {exc}")
+            if on_error is not None:
+                on_error()
         return not self._cancelled(cancel_event)
 
     def _wait_for_enter_or_quit(

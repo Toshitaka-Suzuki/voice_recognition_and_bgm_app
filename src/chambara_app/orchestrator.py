@@ -295,20 +295,72 @@ class IntegratedController:
                 if generation != self._phase_generation or cancel_event.is_set():
                     return
                 loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(
-                    self._conversation_executor,
-                    partial(
-                        self.conversation.run_phase,
-                        phase,
-                        outcome=outcome,
-                        cancel_event=cancel_event,
-                    ),
-                )
+                options = {"outcome": outcome, "cancel_event": cancel_event}
+                progress_task = None
+                if getattr(self.conversation, "supports_progress", False) is True:
+                    pending: asyncio.Queue[dict[str, str] | None] = asyncio.Queue()
+
+                    async def deliver_progress() -> None:
+                        while (progress := await pending.get()) is not None:
+                            await self._conversation_progress(phase, generation, cancel_event, progress)
+
+                    def on_progress(progress: dict[str, str]) -> None:
+                        # 会話専用スレッドからイベントループへ通知するだけにし、録音を待たせません。
+                        if cancel_event.is_set():
+                            return
+                        try:
+                            loop.call_soon_threadsafe(pending.put_nowait, dict(progress))
+                        except RuntimeError:
+                            # 終了済みイベントループへの通知は破棄します。
+                            pass
+
+                    options["on_progress"] = on_progress
+                    progress_task = asyncio.create_task(deliver_progress())
+                try:
+                    result = await loop.run_in_executor(
+                        self._conversation_executor,
+                        partial(self.conversation.run_phase, phase, **options),
+                    )
+                finally:
+                    if progress_task is not None:
+                        # 同一スレッドからの通知を順番どおり送ってから、会話完了を通知します。
+                        pending.put_nowait(None)
+                        await progress_task
             await self._interview_finished(phase, generation, result)
         except Exception as exc:
             async with self._state_lock:
                 if generation == self._phase_generation:
                     await self._runtime_failure_locked(f"インタビューを継続できません: {exc}")
+
+    async def _conversation_progress(
+        self,
+        phase: ConversationPhase,
+        generation: int,
+        cancel_event: Event,
+        progress: dict[str, str],
+    ) -> None:
+        """現接続・現フェーズの進行だけを送り、遅れて届いた旧会話の通知は破棄する。"""
+
+        async with self._state_lock:
+            expected_state = (
+                AppState.PRE_INTERVIEW if phase == ConversationPhase.STRATEGY
+                else AppState.POST_INTERVIEW
+            )
+            if (
+                self._closed or self._send is None or generation != self._phase_generation
+                or cancel_event.is_set() or self._cancel_event is not cancel_event
+                or self.state != expected_state
+            ):
+                return
+            message = {
+                "type": "conversation_progress", "phase": phase.value,
+                **{key: progress[key] for key in ("stage", "text", "reason") if key in progress},
+            }
+            try:
+                await self._send_message(message)
+            except Exception as exc:
+                # 会話の通知は補助情報です。通信失敗を録音・認識・生成の失敗へ変換しません。
+                self.output(f"会話進行を画面へ送信できませんでした: {exc}")
 
     async def _interview_finished(
         self,

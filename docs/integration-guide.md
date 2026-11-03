@@ -43,6 +43,30 @@ waiting_battle_start ─ battle_start → battle（easy、残数3）
 
 統合インタビューでは、質問の読み上げが終わると録音を自動で開始します。認識結果はターミナルへ表示しますが、Enter確認を待たずにLLMへ送信します。無音、録音エラー、認識エラー、空の認識結果では、1秒待ってから同じフェーズの録音を自動で再開します。
 
+### 会話の進行と発話の表示
+
+実際の会話では、通信仕様v2に追加の `conversation_progress` 通知を送ります。既存の状態通知とゲーム開始・終了の順序は変わりません。模擬会話や古い会話部品はこの通知を送らない場合があります。
+
+```json
+{"type":"conversation_progress","phase":"strategy","stage":"thinking","text":"頑張ります"}
+```
+
+`phase` は `strategy`（作戦）または `feedback`（感想）です。
+
+| stage | 意味 | 追加項目 |
+| --- | --- | --- |
+| `question` | 質問を表示して読み上げる | `text`: ロボットの質問 |
+| `preparing` | 録音を準備し、環境音を測定する | なし |
+| `listening` | 環境音測定が終わり、話しかけられる | なし |
+| `recognizing` | 録音した音声を文字へ変換する | なし |
+| `thinking` | 認識した発言を表示し、返答を作る | `text`: 認識した参加者の発言 |
+| `speaking` | 返答を表示して読み上げる | `text`: ロボットの返答 |
+| `retry` | 再試行、または読み上げ失敗を案内する | `reason`: 下記の理由 |
+
+`retry.reason` は `no_speech`（発話なし）、`empty_transcript`（認識文なし）、`recording_failed`（録音失敗）、`recognition_failed`（音声認識失敗）、`reply_failed`（返答生成失敗）、`speech_failed`（読み上げ失敗）のいずれかです。読み上げ失敗時は文章の表示を残して従来どおり先へ進み、それ以外は録音から再試行します。画面へ内部のエラー詳細は送りません。
+
+`thinking` は返答生成中という状態であり、LLMの内部の思考内容は送りません。通知は発生順に送り、会話完了通知より前に送信します。中断・対戦へのスキップ・通信切断後に届く古い会話の通知は破棄します。表示通知の送信失敗によって録音や会話処理を止めることはありません。
+
 弱点残り回数は絶対値です。現在値以下の0〜3だけを受理します。同じ値は受付通知だけを返し、BGMを再開しません。3から1へ飛ばした場合は直接hardへ切り替わります。
 
 ## 3. 起動する
@@ -57,7 +81,7 @@ python -m pip install -e .
 
 `Activate.ps1`の実行がポリシーで拒否された場合は、そのPowerShellで`Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`を実行してから再度有効化します。
 
-Ollama、マイク、Windows日本語音声を使用可能にしてから、統合アプリを起動します。
+従来のHaruka設定ではOllama、マイク、Windows日本語音声を使用可能にしてから、統合アプリを起動します。MacまたはVOICEVOXの声を使う場合は[VOICEVOXガイド](voicevox-guide.md)の設定・起動手順を使ってください。
 
 ```powershell
 python -m chambara_app
@@ -95,7 +119,7 @@ chambara-app --host 192.168.10.10 --port 8765
 既存の環境では`python -m chambara_app --mock-conversation`で起動できます。
 このモードはマイク・認識モデル・LLM・TTSの設定読込と起動チェックを行いません。
 会話を模擬しても、BGMの音声出力と判定区間は通常の設定を使用します。
-Windowsに加えてMacでも起動できます。実際の会話・Windows音声を使う通常モードはWindows向けです。
+Windowsに加えてMacでも起動できます。実際の会話はHaruka設定ではWindows向けです。Macでは[VOICEVOX設定](voicevox-guide.md)を使います。
 
 新しい環境で、LLMなどの依存を入れずに確認する場合は、Python 3.11または3.12で仮想環境を作り、次の最小依存だけをインストールしてください。
 
