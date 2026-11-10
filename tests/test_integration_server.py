@@ -57,7 +57,9 @@ class WebSocketIntegrationTests(unittest.IsolatedAsyncioTestCase):
         try:
             first = await open_connection()
             async with first:
-                self.assertEqual((await receive(first))["type"], "connected")
+                connected = await receive(first)
+                self.assertEqual(connected["type"], "connected")
+                self.assertEqual(connected["protocol_version"], 3)
                 self.assertEqual(await receive(first), {"type": "status", "value": "standby"})
 
                 second = await open_connection()
@@ -67,13 +69,21 @@ class WebSocketIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     await second.wait_closed()
                     self.assertEqual(second.close_code, 1008)
 
-                await first.send(json.dumps({"type": "signal", "name": "game_start"}))
+                await first.send(json.dumps({"type": "signal", "name": "game_start", "difficulty": "unknown"}))
+                self.assertEqual((await receive(first))["type"], "error")
+                await first.send(json.dumps({"type": "signal", "name": "game_start", "difficulty": "hard"}))
                 self.assertEqual((await receive(first))["type"], "received")
                 self.assertEqual(await receive(first), {"type": "status", "value": "pre_interview"})
                 self.assertEqual(
                     await receive(first),
                     {"type": "status", "value": "pre_interview_finished"},
                 )
+                await first.send(json.dumps({"type": "signal", "name": "battle_start"}))
+                self.assertEqual((await receive(first))["type"], "received")
+                self.assertEqual(await receive(first), {"type": "status", "value": "battle_started"})
+                await first.send(json.dumps({"type": "signal", "name": "weak_point_count", "count": 1}))
+                self.assertEqual((await receive(first))["type"], "received")
+                self.assertEqual(controller.game.stages, ["hard"])
         finally:
             controller.shutdown_event.set()
             await asyncio.wait_for(server_task, 3)

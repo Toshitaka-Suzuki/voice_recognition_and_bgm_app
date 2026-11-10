@@ -30,14 +30,30 @@ class AudioPlayer:
         self._last_warning_at = None
         self._reported_underflows = 0
         self.last_block_frames = 0
-        self.guide_start_frame = None
+        self._guide_cue = ()
+        self._guide_reserved_until_frame = 0
 
-    def set_guide_start(self, absolute_ms):
-        """Noneで予告音を止め、それ以外は指定された完全な4拍から開始する。"""
+    @property
+    def guide_schedule_floor_ms(self):
+        """既に出力準備済みのバッファを避けるための最早予約位置。"""
         with self.lock:
-            self.guide_start_frame = (
-                None if absolute_ms is None else round(absolute_ms * self.track.sample_rate / 1000)
-            )
+            return max(self.frames_sent, self._guide_reserved_until_frame) * 1000 / self.track.sample_rate
+
+    def set_guide_cue(self, beats_ms):
+        """選択済みの4拍だけを予約する。Noneは以後の予告音を停止する。"""
+        if beats_ms is None:
+            with self.lock:
+                self._guide_cue = ()
+            return True
+        cue = tuple(
+            (round(beat * self.track.sample_rate / 1000), self.track.guide.tones[index == 3])
+            for index, beat in enumerate(beats_ms)
+        )
+        with self.lock:
+            if cue[0][0] < max(self.frames_sent, self._guide_reserved_until_frame):
+                return False
+            self._guide_cue = cue
+        return True
 
     @property
     def synchronizing(self):
@@ -66,7 +82,8 @@ class AudioPlayer:
         self.stop()
         self.track = track
         self.frames_sent = 0
-        self.guide_start_frame = None
+        self._guide_cue = ()
+        self._guide_reserved_until_frame = 0
         self.started_at = None
         self.device_name = self.device_id = self.host_api = "不明"
         self.output_latency = None
@@ -110,6 +127,9 @@ class AudioPlayer:
         with self.lock:
             self.last_callback_at = perf_counter()
             self.last_block_frames = frames
+            self._guide_reserved_until_frame = self.frames_sent + frames
+            guide_cue = self._guide_cue
+        block_start = self.frames_sent
         try:
             underflow_only = (getattr(status, "output_underflow", False)
                               and not any(getattr(status, flag, False) for flag in
@@ -128,22 +148,20 @@ class AudioPlayer:
                 else:
                     self.anchors.append((audible_at, self.frames_sent, frames))
             offset = 0
-            with self.lock:
-                guide_start = self.guide_start_frame
             while offset < frames:
                 source = self.frames_sent % len(self.track.samples)
                 count = min(frames - offset, len(self.track.samples) - source)
                 outdata[offset:offset + count] = self.track.samples[source:source + count]
-                guide_samples = getattr(self.track, "guide_samples", None)
-                if guide_samples is not None:
+                if self.track.guide is not None:
                     outdata[offset:offset + count] *= 0.65
-                    if guide_start is not None:
-                        skip = min(count, max(0, guide_start - self.frames_sent))
-                        outdata[offset + skip:offset + count] += (
-                            guide_samples[source + skip:source + count, None]
-                        )
                 offset += count
                 self.frames_sent += count
+            # BGMの周回位置とは独立した絶対サンプル番号。選択していない拍は鳴らさない。
+            for start, tone in guide_cue:
+                first = max(block_start, start)
+                last = min(block_start + frames, start + len(tone))
+                if first < last:
+                    outdata[first - block_start:last - block_start] += tone[first - start:last - start, None]
         except Exception as exc:
             self.error = f"音声再生に失敗しました: {exc}"
             outdata.fill(0)

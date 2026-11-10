@@ -52,6 +52,15 @@
   <section>
     <h2>3. 入力信号</h2>
     <p class="hint">通常は「ゲームスタート」→開始前インタビュー完了→「戦闘開始」の順です。開始前インタビュー中に戦闘開始を送ると割り込みも確認できます。</p>
+    <p class="row">
+      <label for="difficulty">開始する難易度</label>
+      <select id="difficulty">
+        <option value="easy">簡単（easy）</option>
+        <option value="normal">普通（normal）</option>
+        <option value="hard">難しい（hard）</option>
+      </select>
+      <span class="hint">1ゲーム中は選んだ難易度とBGMを維持します。</span>
+    </p>
     <div class="row" id="signals">
       <button type="button" data-signal="game_start" disabled>ゲームスタート</button>
       <button type="button" data-signal="battle_start" disabled>戦闘開始</button>
@@ -63,8 +72,8 @@
       <label for="count">弱点残り回数</label>
       <select id="count">
         <option value="3">3（開始時と同じ）</option>
-        <option value="2">2（normal）</option>
-        <option value="1">1（hard）</option>
+        <option value="2">2</option>
+        <option value="1">1</option>
         <option value="0">0（人間勝利）</option>
         <option value="4">4（不正値テスト）</option>
       </select>
@@ -88,14 +97,18 @@
   const lastParry = document.getElementById('last-parry');
   const lastReceived = document.getElementById('last-received');
   const lastError = document.getElementById('last-error');
+  const difficulty = document.getElementById('difficulty');
   const history = document.getElementById('history');
   const lines = [];
   let socket = null;
+  let protocolCompatible = false;
+  let currentStatus = 'standby';
 
   const statusLabels = {
     standby: 'スタンバイ',
     pre_interview: '開始前インタビュー',
     pre_interview_finished: '開始前インタビュー終了',
+    battle_started: '戦闘中',
     post_interview: '終了インタビュー',
     post_interview_finished: '終了インタビュー終了',
   };
@@ -114,15 +127,17 @@
 
   function updateControls() {
     const open = socket?.readyState === WebSocket.OPEN;
+    const ready = open && protocolCompatible;
     connectButton.disabled = socket !== null;
     disconnectButton.disabled = !open;
     endpoint.disabled = socket !== null;
-    document.querySelectorAll('[data-signal]').forEach(button => { button.disabled = !open; });
-    document.getElementById('send-count').disabled = !open;
+    document.querySelectorAll('[data-signal]').forEach(button => { button.disabled = !ready; });
+    document.getElementById('send-count').disabled = !ready;
+    difficulty.disabled = open && currentStatus !== 'standby';
   }
 
   function send(message) {
-    if (socket?.readyState !== WebSocket.OPEN) return;
+    if (socket?.readyState !== WebSocket.OPEN || !protocolCompatible) return;
     const text = JSON.stringify(message);
     socket.send(text);
     log(`送信 → 本アプリ (${socket.url})`, text);
@@ -131,6 +146,8 @@
   function showMessage(message) {
     if (message?.type === 'status' && Object.hasOwn(statusLabels, message.value)) {
       lastStatus.textContent = statusLabels[message.value];
+      currentStatus = message.value;
+      updateControls();
     } else if (message?.type === 'parry_result' && ['success', 'failure'].includes(message.value)) {
       const detail = message.reason ? `（${reasonLabels[message.reason] ?? message.reason}）` : '';
       lastParry.textContent = `${message.value === 'success' ? '成功' : '失敗'}${detail}`;
@@ -140,7 +157,13 @@
       const state = stateLabels[message.state] ?? message.state ?? '不明';
       lastError.textContent = `${message.text}（状態: ${state}）`;
     } else if (message?.type === 'connected' && typeof message.text === 'string') {
-      log('接続通知', message.text);
+      protocolCompatible = message.protocol_version === 3;
+      connectionLabel.textContent = protocolCompatible ? '接続済み' : '更新が必要';
+      if (!protocolCompatible) lastError.textContent = '通信仕様v3に対応したPythonへ更新してください。';
+      log('接続通知', protocolCompatible ? message.text : lastError.textContent);
+      updateControls();
+    } else if (message?.type === 'conversation_progress') {
+      // 任意の会話進行通知は生JSON履歴で確認できます。
     } else {
       log('形式エラー', '想定していないJSONです。');
     }
@@ -161,6 +184,8 @@
       return;
     }
     socket = connection;
+    protocolCompatible = false;
+    currentStatus = 'standby';
     connectionLabel.textContent = '接続中…';
     lastStatus.textContent = lastParry.textContent = lastReceived.textContent = '未受信';
     lastError.textContent = 'なし';
@@ -168,7 +193,7 @@
 
     connection.addEventListener('open', () => {
       if (socket !== connection) return;
-      connectionLabel.textContent = '接続済み';
+      connectionLabel.textContent = '接続確認中…';
       log('接続', connection.url);
       updateControls();
     });
@@ -184,6 +209,8 @@
     connection.addEventListener('close', event => {
       if (socket !== connection) return;
       socket = null;
+      protocolCompatible = false;
+      currentStatus = 'standby';
       connectionLabel.textContent = '未接続';
       log('切断', `コード ${event.code} ${event.reason}`);
       updateControls();
@@ -192,7 +219,10 @@
 
   disconnectButton.addEventListener('click', () => socket?.close(1000, '利用者が切断'));
   document.querySelectorAll('[data-signal]').forEach(button => {
-    button.addEventListener('click', () => send({ type: 'signal', name: button.dataset.signal }));
+    button.addEventListener('click', () => send({
+      type: 'signal', name: button.dataset.signal,
+      ...(button.dataset.signal === 'game_start' ? { difficulty: difficulty.value } : {}),
+    }));
   });
   document.getElementById('count-form').addEventListener('submit', event => {
     event.preventDefault();

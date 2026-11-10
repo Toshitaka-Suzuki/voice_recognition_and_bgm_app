@@ -113,10 +113,10 @@ class FakeGame:
     def track(self):  # noqa: ANN201
         return SimpleNamespace(id=self.current_stage)
 
-    def start(self) -> None:
+    def start(self, stage="easy") -> None:
         self.running = True
-        self.current_stage = "easy"
-        self.stages.append("easy")
+        self.current_stage = stage
+        self.stages.append(stage)
 
     def switch_stage(self, stage: str) -> bool:
         self.current_stage = stage
@@ -173,6 +173,21 @@ class ProtocolTests(unittest.TestCase):
         for count in (-1, 1.5, True, 9_007_199_254_740_992):
             with self.subTest(count=count), self.assertRaises(ProtocolError):
                 parse_signal(json.dumps({"type": "signal", "name": "weak_point_count", "count": count}))
+
+    def test_game_start_difficulty_defaults_and_preserves_request_id(self) -> None:
+        self.assertEqual(parse_signal('{"type":"signal","name":"game_start"}').difficulty, "easy")
+        for difficulty in ("easy", "normal", "hard"):
+            with self.subTest(difficulty=difficulty):
+                signal = parse_signal(json.dumps({
+                    "type": "signal", "name": "game_start", "difficulty": difficulty,
+                    "request_id": "start-1",
+                }))
+                self.assertEqual(signal, Signal("game_start", None, "start-1", difficulty))
+
+    def test_invalid_start_difficulty_is_rejected(self) -> None:
+        for difficulty in (None, "", "HARD", "expert", 1, True, [], {}):
+            with self.subTest(difficulty=difficulty), self.assertRaises(ProtocolError):
+                parse_signal(json.dumps({"type": "signal", "name": "game_start", "difficulty": difficulty}))
 
 
 class IntegratedCliTests(unittest.TestCase):
@@ -274,7 +289,7 @@ class IntegratedControllerTests(unittest.IsolatedAsyncioTestCase):
         await self.controller.handle(Signal("weak_point_count", 0))
         await self.wait_for_state(AppState.STANDBY)
 
-        self.assertEqual(self.game.stages, ["easy", "normal", "hard"])
+        self.assertEqual(self.game.stages, ["easy"])
         self.assertIn("human_win", self.game.stops)
         self.assertEqual(self.conversation.calls[-1][1], FeedbackOutcome.HUMAN_WIN)
         statuses = [m["value"] for m in self.messages if m["type"] == "status"]
@@ -351,10 +366,10 @@ class IntegratedControllerTests(unittest.IsolatedAsyncioTestCase):
             display.status_calls,
             [
                 ("easy", (3, 1234.5, 0), False, False),
-                ("normal", (4, 2000.0, None), False, False),
-                ("hard", None, True, False),
-                ("hard", None, False, True),
-                ("hard", None, False, False),
+                ("easy", (4, 2000.0, None), False, False),
+                ("easy", None, True, False),
+                ("easy", None, False, True),
+                ("easy", None, False, False),
             ],
         )
 
@@ -373,7 +388,7 @@ class IntegratedControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.messages,
             [
-                {"type": "connected", "text": "接続しました", "protocol_version": 2, "conversation_mode": "live"},
+                {"type": "connected", "text": "接続しました", "protocol_version": 3, "conversation_mode": "live", "esp_legacy": True},
                 {"type": "status", "value": "standby"},
             ],
         )

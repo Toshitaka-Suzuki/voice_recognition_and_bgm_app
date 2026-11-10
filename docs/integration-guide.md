@@ -16,20 +16,19 @@ chambara_app（進行状態を一元管理）
 本アプリがWebSocketサーバーです。既定では`ws://127.0.0.1:8765`で待ち受け、最初の1接続だけを制御元として受け付けます。`reference/`のROS/rosbridgeとは別の直接WebSocket仕様です。
 
 `cobopro-chambara`の「プレイ画面」→「会話・BGM連携」から接続できます。
-画面がHP・制限時間・弱点表示を管理し、本アプリが会話・BGM・パリイ判定を担当します。
-接続時に通信仕様v2と会話モードを通知します。旧来の信号（request_idなし）も引き続き受理します。
+画面がHP・制限時間・弱点表示を管理し、本アプリが会話・BGM・通常のパリイ判定を担当します。既存ESP連携モードではESPがパリィを判定し、本アプリは到着時刻で判定し直しません。
+接続時に通信仕様v3と会話モードを通知します。画面とPythonの両方をv3対応版へ更新してください。画面はv2などの古いPythonへ接続してもゲーム開始を許可せず、更新を案内します。`request_id`を省略した手動信号は引き続き受理します。
 
 ## 2. 状態遷移
 
 ```text
 standby
-  └─ game_start → pre_interview
+  └─ game_start（difficulty選択）→ pre_interview
        ├─ インタビュー完了 → waiting_battle_start
        └─ battle_startで中断 ─────────┐
                                       ▼
-waiting_battle_start ─ battle_start → battle（easy、残数3）
-                                      ├─ 残数2 → normal
-                                      ├─ 残数1 → hard
+waiting_battle_start ─ battle_start → battle（選んだ難易度、残数3）
+                                      ├─ 残数2・1 → 難易度とBGMは維持
                                       ├─ 残数0 → 人間勝利 ─┐
                                       └─ battle_end → ロボット勝利
                                                             ▼
@@ -45,7 +44,7 @@ waiting_battle_start ─ battle_start → battle（easy、残数3）
 
 ### 会話の進行と発話の表示
 
-実際の会話では、通信仕様v2に追加の `conversation_progress` 通知を送ります。既存の状態通知とゲーム開始・終了の順序は変わりません。模擬会話や古い会話部品はこの通知を送らない場合があります。
+実際の会話では、通信仕様v3の `conversation_progress` 通知を送ります。既存の状態通知とゲーム開始・終了の順序は変わりません。模擬会話や古い会話部品はこの通知を送らない場合があります。
 
 ```json
 {"type":"conversation_progress","phase":"strategy","stage":"thinking","text":"頑張ります"}
@@ -67,7 +66,9 @@ waiting_battle_start ─ battle_start → battle（easy、残数3）
 
 `thinking` は返答生成中という状態であり、LLMの内部の思考内容は送りません。通知は発生順に送り、会話完了通知より前に送信します。中断・対戦へのスキップ・通信切断後に届く古い会話の通知は破棄します。表示通知の送信失敗によって録音や会話処理を止めることはありません。
 
-弱点残り回数は絶対値です。現在値以下の0〜3だけを受理します。同じ値は受付通知だけを返し、BGMを再開しません。3から1へ飛ばした場合は直接hardへ切り替わります。
+開始前に `easy`・`normal`・`hard` を選び、`game_start`の`difficulty`で送ります。省略時は`easy`、それ以外の値や型はエラーです。選んだ難易度とBGMは1ゲーム中ずっと固定し、弱点への命中では変えません。
+
+弱点残り回数は絶対値です。現在値以下の0〜3だけを受理します。同じ値は受付通知だけを返し、BGMを再開しません。3から1へ飛ばしても難易度は維持し、0で人間勝利になります。終了後の待機・中断・切断ではサーバーの選択値を`easy`へ戻し、次の`game_start`で改めて指定します。
 
 ## 3. 起動する
 
@@ -153,7 +154,7 @@ python -m chambara_app --mock-conversation
 
 ### 戦闘中のBGM・パリイ表示
 
-戦闘中は、PowerShellなどの対話端末でBGM状態を100msごとに同じ1行へ更新します。追加の起動引数は不要です。
+戦闘中は、PowerShellなどの対話端末でBGM状態を100msごとに同じ1行へ更新します。追加の起動引数は不要です。以下は難易度が異なるゲームの表示例です。
 
 ```text
 簡単 | 1234.5 ms | 判定:有効 | 周回1
@@ -195,7 +196,7 @@ python -m http.server 8000 --bind 127.0.0.1 --directory integration_test
 ### 外部統合アプリから本アプリ
 
 ```json
-{"type":"signal","name":"game_start"}
+{"type":"signal","name":"game_start","difficulty":"normal"}
 {"type":"signal","name":"battle_start"}
 {"type":"signal","name":"parry"}
 {"type":"signal","name":"weak_point_count","count":2}
@@ -214,7 +215,7 @@ python -m http.server 8000 --bind 127.0.0.1 --directory integration_test
 ### 本アプリから外部統合アプリ
 
 ```json
-{"type":"connected","text":"接続しました","protocol_version":2,"conversation_mode":"live"}
+{"type":"connected","text":"接続しました","protocol_version":3,"conversation_mode":"live","esp_legacy":true}
 {"type":"status","value":"standby"}
 {"type":"status","value":"pre_interview"}
 {"type":"status","value":"pre_interview_finished"}
@@ -229,13 +230,13 @@ python -m http.server 8000 --bind 127.0.0.1 --directory integration_test
 `not_ready`は、BGM開始直後や音声出力の同期を確認中で再生位置を決められない場合です。通常の失敗は、判定範囲外または同じ周回の同じ判定区間ですでに成功した場合です。
 
 `conversation_mode`は`live`、`mock`、`mock_silent`のいずれかです。
-`battle_start`の`received`は受付だけを表します。`game.start()`成功後に`battle_started`を送ります。
+`battle_start`の`received`は受付だけを表します。`game.start(stage=選択した難易度)`成功後に`battle_started`を送ります。
 音声出力開始直後はまだ`not_ready`になり得ます。開始失敗では`error`→`standby`になり、`battle_started`は送りません。
 
 すべての信号に省略可能な1〜64文字の`request_id`を付けられます。
 `received`に同じIDを返し、`parry_result`にも元の`parry`のIDを付けます。
 IDなしの従来の信号にはIDを追加しません。これは応答の対応付け用で、重複要求の排除や再送を保証するものではありません。
-パリイの判定時刻は従来どおりサーバー受信時刻です。
+通常モードのパリイ判定時刻は従来どおりサーバー受信時刻です。
 
 ```json
 {"type":"signal","name":"parry","request_id":"parry-42"}
@@ -248,10 +249,22 @@ IDなしの従来の信号にはIDを追加しません。これは応答の対�
 ブラウザーは5秒ごとに接続を確認し、開始・終了処理や信号応答が10秒途切れた場合は接続を閉じます。
 会話そのものはこの10秒制限の対象ではなく、会話中もheartbeatを継続します。
 
+### 既存ESPファームウェアを使う場合
+
+`connected.esp_legacy: true`は、既存ESP連携用の進行制御に対応することを示します。通信仕様v3の追加機能です。ESP連携を選ぶ画面はこの値と`rhythm_guide: true`を確認してから、開始時に次を送ります。
+
+```json
+{"type":"signal","name":"game_start","difficulty":"easy","parry_source":"esp_legacy"}
+```
+
+`parry_source`は`python`（省略時）または`esp_legacy`です。ESPモードではPythonは4拍の音と予定を提供しますが、判定時間を過ぎても次の予告を自動では作りません。画面がESPの結果待ちを終えた後、`defense_pause`で現在の機会を終了し、次に構え直しが終わったら`defense_ready`で次の予定を作ります。結果待ちの間も`rhythm_state`には同じ機会の予定と現在の音声位置を返します。
+
+ESPモードでは`parry`信号を送らないでください。送った場合は`error`を返し、到着時刻による判定を行いません。ESPの成功を受けた画面がゲームを進め、弱点命中後の`weak_point_count`や終了・中断は通常どおり送ります。USBコマンド送信、送信時刻の前倒し調整、ESPログの解釈は画面側の担当です。Pythonの変更によってマイコン間の音同期や通信欠落への対処が保証されるわけではありません。
+
 画面のEsc・準備への移動・センサ切断はゲーム中断になります。途中からの再開はしません。
 紙風船破損と時間切れは`battle_end`でロボット勝利として扱います。
 ブラウザー内の仮BGMは連携中に止め、効果音だけを使用します。画面の効果音OFFはPython側の音声をミュートしません。
-ROSや実物のライト制御、認識文・返答本文の画面への配信はこの通信には含みません。
+ROSや実物のライト制御はこの通信には含みません。認識文と返答本文は前述の`conversation_progress`で画面へ送ります。
 
 不正JSON、現在状態に合わない信号、弱点残数の増加には、現在状態付きのエラーを返します。接続は閉じません。
 
@@ -264,17 +277,17 @@ ROSや実物のライト制御、認識文・返答本文の画面への配信�
 ### 人間勝利
 
 1. 接続直後に`standby`を受信する。
-2. 「ゲームスタート」を送り、`received`と`pre_interview`を受信する。
+2. 難易度を選び、「ゲームスタート」に`difficulty`を付けて送り、`received`と`pre_interview`を受信する。
 3. 質問の読み上げ後に自動録音が始まり、認識結果の表示後に自動でコメントが生成されることを確認する。Enterは押さず、`pre_interview_finished`を受信する。
-4. 「戦闘開始」を送り、easyの再生と「簡単」の状態行を確認する。
+4. 「戦闘開始」を送り、選んだ難易度のBGMと状態行を確認する。
 5. 「パリイ」を複数回送り、毎回`received`の後に`parry_result`が届き、ターミナルにも「パリイ成功」または「パリイ失敗」が1回表示されることを確認する。
-6. 残数2でnormalと「普通」、残数1でhardと「難しい」へ変わることを確認する。
+6. 残数2・1になっても、BGMと難易度が開始時のまま続くことを確認する。
 7. 残数0を送り、BGM停止、`post_interview`、人間勝利用質問を確認する。
 8. 終了インタビューも自動録音で完了し、`post_interview_finished`、`standby`を受信する。
 
 ### ロボット勝利と連続ゲーム
 
-1. 次の`game_start`から戦闘開始まで進める。
+1. 次の`game_start`で別の`difficulty`を選び、その難易度で戦闘が始まることを確認する。
 2. 残数0より前に「戦闘終了」を送る。
 3. BGM停止、`post_interview`、ロボット勝利用質問を確認する。
 4. 終了後にstandbyへ戻り、もう一度`game_start`を受理できることを確認する。
@@ -283,7 +296,8 @@ ROSや実物のライト制御、認識文・返答本文の画面への配信�
 
 - 開始前インタビュー中に`battle_start`を送り、質問や録音が中断され、`pre_interview_finished`なしでBGMが始まることを確認する。
 - 戦闘外で`parry`を送り、状態付き`error`を確認する。
-- 残数1の後に2を送り、BGMが戻らず`error`になることを確認する。
+- 残数1の後に2を送り、`error`になり、BGMと選択難易度は維持されることを確認する。
+- `difficulty`を省略して開始するとeasyになること、不正な値では`error`になり待機のままであることを確認する。
 - 戦闘中に切断し、BGMが停止することを確認する。再接続後は新しい`standby`から始める。
 - 2つ目のブラウザーを接続し、エラー後にコード1008で切断されることを確認する。
 
@@ -300,17 +314,18 @@ python -m unittest discover -s tests -v
 ## 8. 4拍ガイドによるブラウザー連携
 
 統合版は既定で4拍ガイドを有効にします。`--mock-conversation`でも実際のBGMと予告音を再生できます。
-「タン・タン・タン・カン！」の最後の高い音で受けます。`config/bgm_settings.json`の基準位置を4個ずつまとめ、4個目を目標にします。
-元の曲と設定ファイルは変更せず、統合版の起動時に判定区間と予告音レイヤーを作ります。単独の`chambara_bgm`は従来どおりです。
-ガイド中は全難易度で目標の前後150ms、終端を含まない300ms区間を使用します。曲末で区間がはみ出る4拍は使用しません。
-`--no-rhythm-guide`を付けると、従来の判定幅・毎拍判定へ戻せます。旧ブラウザー・既存通信サンプルを使う場合もこのオプションを指定してください。
+毎回2・4・6拍のいずれかの待ち時間を抽選し、その後に「タン・タン・タン・カン！」の完全な4拍を案内します。最後の高い音で受けます。待ち時間は現在位置の次のBGM拍を基準にし、予約した4拍の途中で抽選し直すことはありません。見逃して判定時間が過ぎた場合も、次の待ち時間を改めて抽選します。
+元のBGMデータは変更しません。単独の`chambara_bgm`の手動難易度切替は従来どおりです。
+ガイド中は全難易度で目標の前後150ms、終端を含まない300ms区間を使用します。
+`--no-rhythm-guide`を付けると、ランダム待ち・4拍予告を使わず、従来の判定幅・毎拍判定へ戻せます。この場合も統合ゲームの難易度は開始時の選択に固定します。画面とPythonの通信仕様はv3でそろえてください。
 
-### 追加の通信仕様（v2の任意拡張）
+### ガイドの通信仕様（v3）
 
 - `connected`に`rhythm_guide: true`がある場合だけ、ブラウザーは下記のガイド信号を送ります。
 - `rhythm_sync`への応答は`rhythm_state`。同じ`request_id`を返し、`ready`、`active`、`generation`、`stage`、`position_ms`、4個の`beats_ms`、`window_ms`を含みます。時刻は曲の周回を含む絶対再生位置（ms）で、別PCの時計を直接比較しません。再生位置が不明なら`ready: false`です。
-- `defense_pause`は予告音と受け判定を止めます。BGMは継続します。成功・失敗を確定した時点でもPython側で自動停止します。
-- `defense_ready`は次の受けを準備します。現在位置から120ms以上先の完全な4拍を選び、その1拍目から予告音を再開します。以前の攻撃区間は受け付けません。
+- `defense_pause`は予告音と受け判定を止めます。BGMは継続します。通常のPython判定モードでは、成功・失敗を確定した時点でも自動停止します。ESP連携ではWeb側からの停止・準備指示に従います。
+- `defense_ready`は次の受けを準備します。次のBGM拍を基準に2・4・6拍の待ち時間を一度抽選し、その後の完全な4拍を予約します。弱点攻撃や構え直し中は予告音・判定を止め、次の準備で新しい待ち時間から始めます。以前の攻撃区間は受け付けません。
+- 通常のPython判定モードでは、入力せず目標の判定時間を過ぎると、自動で次の待ち時間と4拍を予約します。機会ごとの`opportunity_id`と新しい`beats_ms`を使って次の予告を識別できます。`generation`は再生・停止時に変わる値です。ESP連携では結果待ちの間は現在の予定を保持し、Web側からの`defense_ready`で次を予約します。
 - `parry_result`には`timing: "on_time" | "early" | "late"`と`delta_ms`（負は早い、正は遅い）を追加します。ガイド中の最寄りの有効な目標を基準にします。
 - 音声の準備中は予告も判定も確定しません。画面は古い同期情報を使用し続けず、再同期を待ちます。
 

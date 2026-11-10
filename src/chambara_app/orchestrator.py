@@ -18,7 +18,7 @@ from chambara_talk.models import (
     PhaseRunResult,
 )
 
-from .protocol import Signal, error_message, received
+from .protocol import DIFFICULTIES, PARRY_SOURCES, Signal, error_message, received
 
 SendFunction = Callable[[dict[str, object]], Awaitable[None]]
 
@@ -62,6 +62,8 @@ class IntegratedController:
         )
         self._closed = False
         self.state = AppState.STANDBY
+        self.difficulty = "easy"
+        self.parry_source = "python"
         self.weak_point_count: int | None = None
         self.outcome: FeedbackOutcome | None = None
         self.shutdown_event = asyncio.Event()
@@ -88,7 +90,8 @@ class IntegratedController:
             self._send = send
             await self._send_message({
                 "type": "connected", "text": "接続しました",
-                "protocol_version": 2, "conversation_mode": self.conversation_mode,
+                "protocol_version": 3, "conversation_mode": self.conversation_mode,
+                "esp_legacy": True,
                 **({"rhythm_guide": True} if getattr(self.game.track, "guide", None) is not None else {}),
             })
             await self._send_status("standby")
@@ -162,7 +165,15 @@ class IntegratedController:
         if self.state != AppState.STANDBY:
             await self._state_error("ゲームスタートはstandby中だけ受け付けます。")
             return
+        if not isinstance(signal.difficulty, str) or signal.difficulty not in DIFFICULTIES:
+            await self._state_error("difficultyはeasy、normal、hardのいずれかを指定してください。")
+            return
+        if not isinstance(signal.parry_source, str) or signal.parry_source not in PARRY_SOURCES:
+            await self._state_error("parry_sourceはpythonまたはesp_legacyを指定してください。")
+            return
         await self._send_message(received(signal))
+        self.difficulty = signal.difficulty
+        self.parry_source = signal.parry_source
         self.state = AppState.PRE_INTERVIEW
         await self._send_status("pre_interview")
         self._begin_interview(ConversationPhase.STRATEGY)
@@ -175,19 +186,25 @@ class IntegratedController:
         if self.state == AppState.PRE_INTERVIEW:
             self._cancel_interview_locked()
         try:
-            self.game.start()
+            if self.parry_source == "esp_legacy":
+                self.game.start(stage=self.difficulty, external_parry=True)
+            else:
+                self.game.start(stage=self.difficulty)
         except Exception as exc:
             await self._runtime_failure_locked(f"BGMを開始できませんでした: {exc}")
             return
         self.weak_point_count = 3
         self.outcome = None
         self.state = AppState.BATTLE
-        self.output("戦闘開始: easy BGMを再生します。")
+        self.output(f"戦闘開始: {self.difficulty} BGMを再生します。")
         await self._send_status("battle_started")
 
     async def _handle_parry(self, signal: Signal, timestamp: float) -> None:
         if self.state != AppState.BATTLE:
             await self._state_error("パリイは戦闘中だけ受け付けます。")
+            return
+        if self.parry_source == "esp_legacy":
+            await self._state_error("ESP連携中のパリィ結果はESP側で確定します。parry信号は送信しないでください。")
             return
         await self._send_message(received(signal))
         try:
@@ -239,11 +256,6 @@ class IntegratedController:
         if count == 0:
             await self._finish_battle_locked(FeedbackOutcome.HUMAN_WIN)
             return
-        stage = "normal" if count == 2 else "hard"
-        try:
-            self.game.switch_stage(stage)
-        except Exception as exc:
-            await self._runtime_failure_locked(f"BGMを切り替えできませんでした: {exc}")
 
     async def _handle_battle_end(self, signal: Signal) -> None:
         if self.state != AppState.BATTLE:
@@ -383,6 +395,8 @@ class IntegratedController:
             elif phase == ConversationPhase.FEEDBACK and self.state == AppState.POST_INTERVIEW:
                 await self._send_status("post_interview_finished")
                 self.state = AppState.STANDBY
+                self.difficulty = "easy"
+                self.parry_source = "python"
                 self.weak_point_count = None
                 self.outcome = None
                 await self._send_status("standby")
@@ -406,6 +420,8 @@ class IntegratedController:
         finally:
             self._clear_bgm_status()
         self.state = AppState.STANDBY
+        self.difficulty = "easy"
+        self.parry_source = "python"
         self.weak_point_count = None
         self.outcome = None
         if send_status and self._send is not None:

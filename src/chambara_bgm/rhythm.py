@@ -1,67 +1,47 @@
-"""統合版の4拍ガイド。音・表示・判定は同じ音声サンプル位置を使用する。"""
+"""BGMの拍位置から、その都度1回分だけ4拍ガイドを予約する。"""
+from bisect import bisect_left
 from dataclasses import dataclass, replace
 from math import floor
 
-from .config import Window
-
 HALF_WINDOW_MS = 150
-
-
-@dataclass(frozen=True)
-class GuideCue:
-    beats_ms: tuple[float, ...]
-
-    @property
-    def target_ms(self):
-        return self.beats_ms[-1]
+WAIT_BEATS = (2, 4, 6)
 
 
 @dataclass(frozen=True)
 class RhythmGuide:
-    cues: tuple[GuideCue, ...]
+    beats_ms: tuple[float, ...]
+    tones: tuple[object, object]
 
-    def occurrences(self, position_ms, duration_ms, armed_from_ms):
-        """周回境界の前後も含め、現在付近の有効な攻撃を返す。"""
-        lap = floor(position_ms / duration_ms)
-        return [
-            tuple(beat + cycle * duration_ms for beat in cue.beats_ms)
-            for cycle in range(max(0, lap - 1), lap + 3)
-            for cue in self.cues
-            if (cue.beats_ms[0] + cycle * duration_ms >= armed_from_ms
-                and cue.target_ms + cycle * duration_ms >= 0)
-        ]
+    def next_cue(self, after_ms: float, duration_ms: float, wait_beats: int):
+        """次のBGM拍を基準に待ち拍数を空け、周回をまたぐ4拍を返す。"""
+        cycle = floor(after_ms / duration_ms)
+        index = cycle * len(self.beats_ms) + bisect_left(
+            self.beats_ms, after_ms - cycle * duration_ms,
+        ) + wait_beats
+
+        def absolute_beat(i):
+            lap, beat = divmod(i, len(self.beats_ms))
+            return lap * duration_ms + self.beats_ms[beat]
+
+        return tuple(absolute_beat(index + offset) for offset in range(4))
 
 
 def with_rhythm_guide(track):
-    """元の拍位置から4拍ごとの攻撃と予告音を作る。単独BGM版は変更しない。"""
+    """固定の予告配置は作らず、拍一覧と短い2種類の予告音だけを用意する。"""
     import numpy as np
 
-    beats = tuple(sorted(set(track.beats_ms)))
-    cues = tuple(
-        GuideCue(beats[i:i + 4])
-        for i in range(0, len(beats) - 3, 4)
-        if beats[i + 3] + HALF_WINDOW_MS < track.duration_ms
-    )
-    if not cues:
+    beats = tuple(sorted(set(beat for beat in track.beats_ms if 0 <= beat < track.duration_ms)))
+    if len(beats) < 4:
         raise ValueError(f"{track.id}: 4拍ガイドには曲内の拍が4つ以上必要です")
-    guide_samples = np.zeros(len(track.samples), dtype=np.float32)
-    for cue in cues:
-        for index, beat in enumerate(cue.beats_ms):
-            target = index == 3
-            length = int(track.sample_rate * (0.11 if target else 0.065))
-            t = np.arange(length) / track.sample_rate
-            frequency = 1320 if target else 660
-            # 短い木音を3回、最後だけ高い金属音。BGMと同じ出力コールバックで鳴る。
-            tone = np.sin(2 * np.pi * frequency * t)
-            if target:
-                tone += 0.35 * np.sin(2 * np.pi * frequency * 2.73 * t)
-            tone *= np.minimum(t / 0.003, 1) * np.exp(-t * (40 if target else 65))
-            start = round(beat * track.sample_rate / 1000)
-            end = min(start + length, len(guide_samples))
-            guide_samples[start:end] += tone[:end - start] * (0.25 if target else 0.19)
-    return replace(
-        track,
-        windows=tuple(Window(c.target_ms - HALF_WINDOW_MS, c.target_ms + HALF_WINDOW_MS) for c in cues),
-        guide=RhythmGuide(cues),
-        guide_samples=guide_samples,
-    )
+    tones = []
+    for target in (False, True):
+        length = max(1, round(track.sample_rate * (0.11 if target else 0.065)))
+        t = np.arange(length) / track.sample_rate
+        frequency = 1320 if target else 660
+        tone = np.sin(2 * np.pi * frequency * t)
+        if target:
+            tone += 0.35 * np.sin(2 * np.pi * frequency * 2.73 * t)
+        tone *= np.minimum(t / 0.003, 1) * np.exp(-t * (40 if target else 65))
+        tones.append((tone * (0.25 if target else 0.19)).astype(np.float32))
+    # 判定窓はGameが予約した1機会から計算する。元の単独BGM用Trackは変更しない。
+    return replace(track, windows=(), guide=RhythmGuide(beats, tuple(tones)), guide_samples=None)

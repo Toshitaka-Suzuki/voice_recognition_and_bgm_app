@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass
 
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
+DIFFICULTIES = ("easy", "normal", "hard")
+PARRY_SOURCES = ("python", "esp_legacy")
 SIGNAL_LABELS = {
     "game_start": "ゲームスタート",
     "battle_start": "戦闘開始",
@@ -26,11 +28,13 @@ class ProtocolError(ValueError):
 
 @dataclass(frozen=True)
 class Signal:
-    """検証済みの入力信号。弱点信号だけ``count``を持つ。"""
+    """検証済みの入力信号。省略時はeasy・Pythonによるパリィ判定。"""
 
     name: str
     count: int | None = None
     request_id: str | None = None
+    difficulty: str = "easy"
+    parry_source: str = "python"
 
 
 def parse_signal(raw: str | bytes) -> Signal:
@@ -52,6 +56,14 @@ def parse_signal(raw: str | bytes) -> Signal:
         not isinstance(request_id, str) or not 1 <= len(request_id) <= 64
     ):
         raise ProtocolError("request_idは1〜64文字の文字列で指定してください。")
+    if name == "game_start":
+        difficulty = message.get("difficulty", "easy")
+        if not isinstance(difficulty, str) or difficulty not in DIFFICULTIES:
+            raise ProtocolError("difficultyはeasy、normal、hardのいずれかを指定してください。")
+        parry_source = message.get("parry_source", "python")
+        if not isinstance(parry_source, str) or parry_source not in PARRY_SOURCES:
+            raise ProtocolError("parry_sourceはpythonまたはesp_legacyを指定してください。")
+        return Signal(name, request_id=request_id, difficulty=difficulty, parry_source=parry_source)
     if name != "weak_point_count":
         return Signal(name, request_id=request_id)
     count = message.get("count")

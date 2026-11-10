@@ -29,5 +29,5 @@ class SilentAudioPlayer:
     def take_warning(self, now):
         return None
 
-    def set_guide_start(self, absolute_ms):
-        pass
+    def set_guide_cue(self, beats_ms):
+        return True
